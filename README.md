@@ -218,6 +218,108 @@ STATIC_ROOT=staticfiles
 - **WebhookEvent**: Webhook event logs
 - **Subscription**: Subscription management
 
+## 💳 Checkout & Payment System
+
+### Payment Methods Supported:
+- **Stripe** - Credit/Debit cards, digital wallets
+- **PayPal** - PayPal accounts (future implementation)
+- **Manual** - Bank transfers, cash on delivery
+
+### Checkout Flow:
+1. **Cart Review** - User reviews items and applies coupons
+2. **Shipping Information** - User provides delivery address
+3. **Payment Method** - User selects payment method
+4. **Payment Processing** - Secure payment via Stripe
+5. **Order Confirmation** - Order created and payment confirmed
+6. **WhatsApp Notification** - Store owner receives instant notification
+
+### WhatsApp Integration:
+- **Instant Notifications** - Store owners receive WhatsApp messages for new orders
+- **Payment Confirmations** - Real-time payment status updates
+- **Order Details** - Complete order information including customer details
+- **Business Account** - Uses Twilio WhatsApp Business API
+
+### API Endpoints:
+
+#### Checkout Process:
+```
+POST /api/v1/payments/checkout/          # Complete checkout
+POST /api/v1/payments/create-payment-intent/  # Create payment intent
+POST /api/v1/payments/confirm-payment/   # Confirm payment
+```
+
+#### Payment Methods:
+```
+GET    /api/v1/payments/payment-methods/     # List payment methods
+POST   /api/v1/payments/payment-methods/create/  # Add payment method
+PUT    /api/v1/payments/payment-methods/{id}/    # Update payment method
+DELETE /api/v1/payments/payment-methods/{id}/    # Remove payment method
+```
+
+#### Webhooks:
+```
+POST /api/v1/payments/webhook/stripe/    # Stripe webhook handler
+```
+
+### Environment Variables Required:
+```bash
+# Stripe Configuration
+STRIPE_SECRET_KEY=sk_test_...
+STRIPE_PUBLISHABLE_KEY=pk_test_...
+STRIPE_WEBHOOK_SECRET=whsec_...
+
+# WhatsApp/Twilio Configuration
+TWILIO_ACCOUNT_SID=AC...
+TWILIO_AUTH_TOKEN=...
+TWILIO_WHATSAPP_FROM=+14155238886  # Twilio WhatsApp number
+STORE_OWNER_WHATSAPP=+1234567890   # Store owner's WhatsApp number
+```
+
+### Frontend Integration Example:
+```javascript
+// Complete checkout process
+const checkout = async (checkoutData) => {
+  const response = await fetch('/api/v1/payments/checkout/', {
+    method: 'POST',
+    headers: {
+      'Authorization': `Bearer ${token}`,
+      'Content-Type': 'application/json'
+    },
+    body: JSON.stringify({
+      shipping_address: {
+        name: 'John Doe',
+        line1: '123 Main St',
+        city: 'New York',
+        state: 'NY',
+        postal_code: '10001',
+        country: 'US',
+        phone: '+1234567890'
+      },
+      customer_notes: 'Please deliver after 6 PM'
+    })
+  });
+  
+  const result = await response.json();
+  return result; // Contains client_secret for Stripe
+};
+
+// Confirm payment with Stripe
+const confirmPayment = async (paymentIntentId) => {
+  const response = await fetch('/api/v1/payments/confirm-payment/', {
+    method: 'POST',
+    headers: {
+      'Authorization': `Bearer ${token}`,
+      'Content-Type': 'application/json'
+    },
+    body: JSON.stringify({
+      payment_intent_id: paymentIntentId
+    })
+  });
+  
+  return await response.json();
+};
+```
+
 ### Wishlist
 - **Wishlist**: User wishlists
 - **WishlistItem**: Items in wishlist
