@@ -1,104 +1,131 @@
 from rest_framework import serializers
-from django.contrib.auth import get_user_model
-from .models import Payment, Refund, PaymentMethod, WebhookEvent, Subscription
-
-User = get_user_model()
+from .models import Payment, PaymentMethod, Refund, WebhookEvent
 
 
 class PaymentSerializer(serializers.ModelSerializer):
-    """Serializer for payments."""
+    """Serializer for payment records."""
+
+    payment_method_display = serializers.CharField(
+        source='get_payment_method_display', read_only=True)
+    status_display = serializers.CharField(
+        source='get_status_display', read_only=True)
+    order_number = serializers.CharField(
+        source='order.order_number', read_only=True)
 
     class Meta:
         model = Payment
-        fields = ('id', 'order', 'user', 'amount', 'currency', 'payment_method', 'status',
-                  'stripe_payment_intent_id', 'stripe_charge_id', 'stripe_customer_id',
-                  'error_message', 'error_code', 'metadata', 'created_at', 'updated_at')
-        read_only_fields = ('id', 'user', 'stripe_payment_intent_id', 'stripe_charge_id',
-                            'stripe_customer_id', 'error_message', 'error_code', 'created_at', 'updated_at')
+        fields = (
+            'id', 'order', 'order_number', 'user', 'amount', 'currency',
+            'payment_method', 'payment_method_display', 'status', 'status_display',
+            'stripe_payment_intent_id', 'stripe_charge_id', 'error_message',
+            'created_at', 'updated_at'
+        )
+        read_only_fields = (
+            'id', 'order', 'user', 'stripe_payment_intent_id', 'stripe_charge_id',
+            'error_message', 'created_at', 'updated_at'
+        )
 
 
-class PaymentCreateSerializer(serializers.ModelSerializer):
-    """Serializer for creating payments."""
+class PaymentMethodSerializer(serializers.ModelSerializer):
+    """Serializer for payment methods."""
+
+    type_display = serializers.CharField(
+        source='get_type_display', read_only=True)
+    brand_display = serializers.CharField(source='brand', read_only=True)
 
     class Meta:
-        model = Payment
-        fields = ('order', 'amount', 'currency', 'payment_method')
-
-    def validate(self, attrs):
-        """Validate payment data."""
-        order = attrs['order']
-        amount = attrs['amount']
-
-        # Ensure payment amount matches order total
-        if amount != order.total_amount:
-            raise serializers.ValidationError(
-                'Payment amount must match order total.')
-
-        # Ensure order belongs to current user
-        user = self.context['request'].user
-        if order.user != user:
-            raise serializers.ValidationError(
-                'You can only create payments for your own orders.')
-
-        return attrs
-
-    def create(self, validated_data):
-        """Create a new payment."""
-        validated_data['user'] = self.context['request'].user
-        return super().create(validated_data)
+        model = PaymentMethod
+        fields = (
+            'id', 'user', 'type', 'type_display', 'is_default',
+            'stripe_payment_method_id', 'last4', 'brand', 'brand_display',
+            'exp_month', 'exp_year', 'bank_name', 'account_last4',
+            'created_at', 'updated_at'
+        )
+        read_only_fields = (
+            'id', 'user', 'stripe_payment_method_id', 'last4', 'brand',
+            'exp_month', 'exp_year', 'bank_name', 'account_last4',
+            'created_at', 'updated_at'
+        )
 
 
-class PaymentIntentSerializer(serializers.Serializer):
-    """Serializer for creating Stripe payment intents."""
+class CreatePaymentIntentSerializer(serializers.Serializer):
+    """Serializer for creating payment intents."""
 
-    amount = serializers.DecimalField(max_digits=10, decimal_places=2)
-    currency = serializers.CharField(default='usd', max_length=3)
     order_id = serializers.IntegerField()
-    payment_method_types = serializers.ListField(
-        child=serializers.CharField(),
-        default=['card']
-    )
-
-    def validate_amount(self, value):
-        """Validate amount."""
-        if value <= 0:
-            raise serializers.ValidationError('Amount must be greater than 0.')
-        return value
 
     def validate_order_id(self, value):
-        """Validate order exists and belongs to user."""
+        """Validate that the order exists and belongs to the user."""
         from orders.models import Order
+        request = self.context.get('request')
+
+        if not request or not request.user.is_authenticated:
+            raise serializers.ValidationError("User must be authenticated.")
 
         try:
-            order = Order.objects.get(
-                id=value, user=self.context['request'].user)
+            order = Order.objects.get(id=value, user=request.user)
+            if order.payment_status == 'paid':
+                raise serializers.ValidationError(
+                    "Order has already been paid.")
         except Order.DoesNotExist:
-            raise serializers.ValidationError('Order not found.')
+            raise serializers.ValidationError("Order not found.")
 
         return value
 
 
-class PaymentConfirmSerializer(serializers.Serializer):
+class ConfirmPaymentSerializer(serializers.Serializer):
     """Serializer for confirming payments."""
 
-    payment_intent_id = serializers.CharField()
-    order_id = serializers.IntegerField()
+    payment_intent_id = serializers.CharField(max_length=255)
 
     def validate_payment_intent_id(self, value):
-        """Validate payment intent ID."""
-        if not value:
-            raise serializers.ValidationError('Payment intent ID is required.')
-        return value
+        """Validate that the payment intent exists and belongs to the user."""
+        request = self.context.get('request')
 
-    def validate_order_id(self, value):
-        """Validate order exists and belongs to user."""
-        from orders.models import Order
+        if not request or not request.user.is_authenticated:
+            raise serializers.ValidationError("User must be authenticated.")
 
         try:
-            order = Order.objects.get(
-                id=value, user=self.context['request'].user)
-        except Order.DoesNotExist:
-            raise serializers.ValidationError('Order not found.')
+            payment = Payment.objects.get(
+                stripe_payment_intent_id=value,
+                user=request.user
+            )
+        except Payment.DoesNotExist:
+            raise serializers.ValidationError("Payment intent not found.")
+
+        return value
+
+
+class CheckoutSerializer(serializers.Serializer):
+    """Serializer for checkout data."""
+
+    shipping_address = serializers.DictField()
+    billing_address = serializers.DictField(required=False)
+    customer_notes = serializers.CharField(
+        max_length=1000, required=False, allow_blank=True)
+    shipping_method_id = serializers.IntegerField(required=False)
+
+    def validate_shipping_address(self, value):
+        """Validate shipping address."""
+        required_fields = ['name', 'line1', 'city',
+                           'state', 'postal_code', 'country']
+
+        for field in required_fields:
+            if not value.get(field):
+                raise serializers.ValidationError(
+                    f"Shipping address {field} is required.")
+
+        return value
+
+    def validate_billing_address(self, value):
+        """Validate billing address if provided."""
+        if value:
+            required_fields = ['name', 'line1', 'city',
+                               'state', 'postal_code', 'country']
+
+            for field in required_fields:
+                if not value.get(field):
+                    raise serializers.ValidationError(
+                        f"Billing address {field} is required.")
 
         return value
 
@@ -106,77 +133,23 @@ class PaymentConfirmSerializer(serializers.Serializer):
 class RefundSerializer(serializers.ModelSerializer):
     """Serializer for refunds."""
 
-    class Meta:
-        model = Refund
-        fields = ('id', 'payment', 'amount', 'currency', 'reason', 'status',
-                  'stripe_refund_id', 'metadata', 'created_at', 'updated_at')
-        read_only_fields = ('id', 'stripe_refund_id',
-                            'created_at', 'updated_at')
-
-
-class RefundCreateSerializer(serializers.ModelSerializer):
-    """Serializer for creating refunds."""
+    status_display = serializers.CharField(
+        source='get_status_display', read_only=True)
+    reason_display = serializers.CharField(
+        source='get_reason_display', read_only=True)
+    payment_order_number = serializers.CharField(
+        source='payment.order.order_number', read_only=True)
 
     class Meta:
         model = Refund
-        fields = ('payment', 'amount', 'reason')
-
-    def validate(self, attrs):
-        """Validate refund data."""
-        payment = attrs['payment']
-        amount = attrs['amount']
-
-        # Ensure refund amount doesn't exceed payment amount
-        if amount > payment.amount:
-            raise serializers.ValidationError(
-                'Refund amount cannot exceed payment amount.')
-
-        # Ensure payment belongs to current user
-        user = self.context['request'].user
-        if payment.user != user:
-            raise serializers.ValidationError(
-                'You can only create refunds for your own payments.')
-
-        return attrs
-
-
-class PaymentMethodSerializer(serializers.ModelSerializer):
-    """Serializer for payment methods."""
-
-    display_info = serializers.SerializerMethodField()
-
-    class Meta:
-        model = PaymentMethod
-        fields = ('id', 'user', 'type', 'is_default', 'stripe_payment_method_id',
-                  'last4', 'brand', 'exp_month', 'exp_year', 'bank_name', 'account_last4',
-                  'display_info', 'metadata', 'created_at', 'updated_at')
-        read_only_fields = ('id', 'user', 'stripe_payment_method_id', 'last4', 'brand',
-                            'exp_month', 'exp_year', 'bank_name', 'account_last4', 'created_at', 'updated_at')
-
-    def get_display_info(self, obj):
-        """Get display information for payment method."""
-        if obj.type == 'card':
-            return f"{obj.brand.title()} ****{obj.last4}"
-        elif obj.type == 'bank_account':
-            return f"{obj.bank_name} ****{obj.account_last4}"
-        return obj.get_type_display()
-
-
-class PaymentMethodCreateSerializer(serializers.ModelSerializer):
-    """Serializer for creating payment methods."""
-
-    payment_method_id = serializers.CharField(write_only=True)
-
-    class Meta:
-        model = PaymentMethod
-        fields = ('type', 'payment_method_id', 'is_default')
-
-    def create(self, validated_data):
-        """Create a new payment method."""
-        validated_data['user'] = self.context['request'].user
-        validated_data['stripe_payment_method_id'] = validated_data.pop(
-            'payment_method_id')
-        return super().create(validated_data)
+        fields = (
+            'id', 'payment', 'payment_order_number', 'amount', 'currency',
+            'reason', 'reason_display', 'status', 'status_display',
+            'stripe_refund_id', 'created_at', 'updated_at'
+        )
+        read_only_fields = (
+            'id', 'payment', 'stripe_refund_id', 'created_at', 'updated_at'
+        )
 
 
 class WebhookEventSerializer(serializers.ModelSerializer):
@@ -184,66 +157,135 @@ class WebhookEventSerializer(serializers.ModelSerializer):
 
     class Meta:
         model = WebhookEvent
-        fields = ('id', 'stripe_event_id', 'event_type', 'api_version', 'created',
-                  'livemode', 'data', 'processed', 'processed_at', 'processing_error', 'created_at')
-        read_only_fields = ('id', 'stripe_event_id', 'event_type', 'api_version', 'created',
-                            'livemode', 'data', 'processed', 'processed_at', 'processing_error', 'created_at')
+        fields = (
+            'id', 'stripe_event_id', 'event_type', 'api_version',
+            'created', 'livemode', 'processed', 'processing_error',
+            'created_at', 'processed_at'
+        )
+        read_only_fields = '__all__'
 
 
-class SubscriptionSerializer(serializers.ModelSerializer):
-    """Serializer for subscriptions."""
+class PaymentSummarySerializer(serializers.ModelSerializer):
+    """Serializer for payment summary."""
+
+    order_number = serializers.CharField(
+        source='order.order_number', read_only=True)
+    customer_name = serializers.CharField(
+        source='order.user.get_full_name', read_only=True)
+    customer_email = serializers.CharField(
+        source='order.user.email', read_only=True)
+    payment_method_display = serializers.CharField(
+        source='get_payment_method_display', read_only=True)
+    status_display = serializers.CharField(
+        source='get_status_display', read_only=True)
 
     class Meta:
-        model = Subscription
-        fields = ('id', 'user', 'stripe_subscription_id', 'stripe_customer_id', 'status',
-                  'current_period_start', 'current_period_end', 'cancel_at_period_end', 'canceled_at',
-                  'amount', 'currency', 'interval', 'interval_count', 'metadata', 'created_at', 'updated_at')
-        read_only_fields = ('id', 'user', 'stripe_subscription_id', 'stripe_customer_id',
-                            'current_period_start', 'current_period_end', 'canceled_at', 'created_at', 'updated_at')
+        model = Payment
+        fields = (
+            'id', 'order_number', 'customer_name', 'customer_email',
+            'amount', 'currency', 'payment_method', 'payment_method_display',
+            'status', 'status_display', 'created_at'
+        )
+        read_only_fields = '__all__'
 
 
-class PaymentStatusSerializer(serializers.Serializer):
-    """Serializer for payment status updates."""
+class CreateRefundSerializer(serializers.Serializer):
+    """Serializer for creating refunds."""
 
-    payment_intent_id = serializers.CharField()
-    status = serializers.CharField()
-    order_id = serializers.IntegerField()
+    payment_id = serializers.IntegerField()
+    amount = serializers.DecimalField(max_digits=10, decimal_places=2)
+    reason = serializers.ChoiceField(
+        choices=Refund.REFUND_REASONS, required=False)
 
-    def validate_status(self, value):
-        """Validate payment status."""
-        valid_statuses = ['succeeded', 'processing',
-                          'requires_payment_method', 'canceled', 'failed']
-        if value not in valid_statuses:
-            raise serializers.ValidationError('Invalid payment status.')
+    def validate_payment_id(self, value):
+        """Validate that the payment exists."""
+        try:
+            payment = Payment.objects.get(id=value)
+            if payment.status != 'succeeded':
+                raise serializers.ValidationError(
+                    "Payment must be successful to refund.")
+        except Payment.DoesNotExist:
+            raise serializers.ValidationError("Payment not found.")
+
+        return value
+
+    def validate_amount(self, value):
+        """Validate refund amount."""
+        payment_id = self.initial_data.get('payment_id')
+        if payment_id:
+            try:
+                payment = Payment.objects.get(id=payment_id)
+                if value > payment.amount:
+                    raise serializers.ValidationError(
+                        "Refund amount cannot exceed payment amount.")
+            except Payment.DoesNotExist:
+                pass
+
         return value
 
 
-class PaymentMethodAttachSerializer(serializers.Serializer):
-    """Serializer for attaching payment methods to customers."""
+class PaymentMethodCreateSerializer(serializers.ModelSerializer):
+    """Serializer for creating payment methods with Stripe."""
 
-    payment_method_id = serializers.CharField()
-    customer_id = serializers.CharField()
+    payment_method_id = serializers.CharField(max_length=255, write_only=True)
 
-    def validate_payment_method_id(self, value):
-        """Validate payment method ID."""
-        if not value:
-            raise serializers.ValidationError('Payment method ID is required.')
-        return value
+    class Meta:
+        model = PaymentMethod
+        fields = ('type', 'payment_method_id', 'is_default')
 
-    def validate_customer_id(self, value):
-        """Validate customer ID."""
-        if not value:
-            raise serializers.ValidationError('Customer ID is required.')
-        return value
+    def create(self, validated_data):
+        """Create payment method with Stripe integration."""
+        import stripe
+        from django.conf import settings
 
+        stripe.api_key = settings.STRIPE_SECRET_KEY
 
-class PaymentMethodDetachSerializer(serializers.Serializer):
-    """Serializer for detaching payment methods from customers."""
+        payment_method_id = validated_data.pop('payment_method_id')
+        user = self.context['request'].user
 
-    payment_method_id = serializers.CharField()
+        try:
+            # Attach payment method to customer
+            customer_id = getattr(user, 'stripe_customer_id', None)
+            if not customer_id:
+                # Create customer if doesn't exist
+                customer = stripe.Customer.create(
+                    email=user.email,
+                    name=user.get_full_name() or user.email
+                )
+                user.stripe_customer_id = customer.id
+                user.save()
+                customer_id = customer.id
 
-    def validate_payment_method_id(self, value):
-        """Validate payment method ID."""
-        if not value:
-            raise serializers.ValidationError('Payment method ID is required.')
-        return value
+            # Attach payment method to customer
+            stripe.PaymentMethod.attach(
+                payment_method_id,
+                customer=customer_id
+            )
+
+            # Get payment method details
+            pm = stripe.PaymentMethod.retrieve(payment_method_id)
+
+            # Create local payment method record
+            payment_method = PaymentMethod.objects.create(
+                user=user,
+                stripe_payment_method_id=payment_method_id,
+                stripe_customer_id=customer_id,
+                type=validated_data.get('type', 'card'),
+                is_default=validated_data.get('is_default', False),
+                last4=pm.card.last4 if pm.card else '',
+                brand=pm.card.brand if pm.card else '',
+                exp_month=pm.card.exp_month if pm.card else None,
+                exp_year=pm.card.exp_year if pm.card else None,
+                bank_name=pm.ideal.bank if hasattr(
+                    pm, 'ideal') and pm.ideal else '',
+                account_last4=pm.ideal.bank if hasattr(
+                    pm, 'ideal') and pm.ideal else ''
+            )
+
+            return payment_method
+
+        except stripe.error.StripeError as e:
+            raise serializers.ValidationError(f"Stripe error: {str(e)}")
+        except Exception as e:
+            raise serializers.ValidationError(
+                f"Error creating payment method: {str(e)}")
