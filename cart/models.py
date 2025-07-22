@@ -29,7 +29,8 @@ class Cart(models.Model):
     @property
     def total_price_with_tax(self):
         """Calculate total price including tax (assuming 8.5% tax rate)."""
-        return self.total_price * 1.085
+        from decimal import Decimal
+        return self.total_price * Decimal('1.085')
 
     def clear(self):
         """Clear all items from cart."""
@@ -118,11 +119,13 @@ class CartCoupon(models.Model):
 
     def calculate_discount(self, cart_total):
         """Calculate discount amount for given cart total."""
+        from decimal import Decimal
+
         if not self.is_valid or cart_total < self.minimum_purchase:
             return 0
 
         if self.coupon_type == 'percentage':
-            discount = cart_total * (self.value / 100)
+            discount = cart_total * (self.value / Decimal('100'))
             if self.maximum_discount:
                 discount = min(discount, self.maximum_discount)
             return discount
