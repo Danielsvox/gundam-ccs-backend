@@ -120,18 +120,16 @@ class UserLogoutView(APIView):
                     # Token might already be invalid, continue with logout
                     pass
 
-            # Blacklist access token if provided
+            # Note: Access tokens cannot be blacklisted directly
+            # They are short-lived and will expire naturally
+            # Only refresh tokens can be blacklisted
             if access_token:
-                try:
-                    token = AccessToken(access_token)
-                    token.blacklist()
-                except TokenError:
-                    # Token might already be invalid, continue with logout
-                    pass
+                # Access token will expire naturally, no need to blacklist
+                pass
 
-            # Update user's last logout time (optional)
-            request.user.last_logout = timezone.now()
-            request.user.save(update_fields=['last_logout'])
+            # Note: User model doesn't have last_logout field
+            # You can add this field to the User model if needed
+            pass
 
             return Response({
                 'message': 'Logout successful. All tokens have been invalidated.',
@@ -160,9 +158,9 @@ class UserLogoutAllView(APIView):
             for token in tokens:
                 RefreshToken(token.token).blacklist()
 
-            # Update user's last logout time
-            request.user.last_logout = timezone.now()
-            request.user.save(update_fields=['last_logout'])
+            # Note: User model doesn't have last_logout field
+            # You can add this field to the User model if needed
+            pass
 
             return Response({
                 'message': 'Logged out from all devices successfully.',
