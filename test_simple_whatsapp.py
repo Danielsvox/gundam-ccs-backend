@@ -4,6 +4,7 @@ Simple WhatsApp configuration test
 """
 
 import os
+from decouple import config
 from twilio.rest import Client
 from twilio.base.exceptions import TwilioException
 
@@ -13,10 +14,10 @@ def test_twilio_configuration():
     print("🔧 Testing Twilio Configuration...")
 
     # Get configuration from environment
-    account_sid = os.getenv('TWILIO_ACCOUNT_SID')
-    auth_token = os.getenv('TWILIO_AUTH_TOKEN')
-    from_number = os.getenv('TWILIO_WHATSAPP_FROM', '+14155238886')
-    to_number = os.getenv('STORE_OWNER_WHATSAPP', '+584242263633')
+    account_sid = config('TWILIO_ACCOUNT_SID', default='')
+    auth_token = config('TWILIO_AUTH_TOKEN', default='')
+    from_number = config('TWILIO_WHATSAPP_FROM', default='+14155238886')
+    to_number = config('STORE_OWNER_WHATSAPP', default='+584242263633')
 
     print(f"Account SID: {'✅ Set' if account_sid else '❌ Missing'}")
     print(f"Auth Token: {'✅ Set' if auth_token else '❌ Missing'}")

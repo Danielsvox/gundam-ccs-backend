@@ -114,23 +114,23 @@ class OrderCreateSerializer(serializers.ModelSerializer):
 
     def validate_shipping_address(self, value):
         """Validate shipping address."""
-        required_fields = ['first_name', 'last_name', 'address_line_1',
-                           'city', 'state', 'postal_code', 'country', 'phone']
+        required_fields = ['name', 'line1', 'city',
+                           'state', 'postal_code', 'country']
         for field in required_fields:
             if not value.get(field):
                 raise serializers.ValidationError(
-                    f'{field.replace("_", " ").title()} is required.')
+                    f"Shipping address {field} is required.")
         return value
 
     def validate_billing_address(self, value):
-        """Validate billing address."""
+        """Validate billing address if provided."""
         if value:
-            required_fields = ['first_name', 'last_name', 'address_line_1',
-                               'city', 'state', 'postal_code', 'country', 'phone']
+            required_fields = ['name', 'line1', 'city',
+                               'state', 'postal_code', 'country']
             for field in required_fields:
                 if not value.get(field):
                     raise serializers.ValidationError(
-                        f'{field.replace("_", " ").title()} is required.')
+                        f"Billing address {field} is required.")
         return value
 
 
