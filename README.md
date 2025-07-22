@@ -57,7 +57,7 @@ A comprehensive Django REST API backend for the Gundam Custom Collection Store -
 
 1. **Clone the repository**
    ```bash
-   git clone <repository-url>
+   git clone https://github.com/Danielsvox/gundam-ccs-backend.git
    cd gundam-ccs-backend
    ```
 
