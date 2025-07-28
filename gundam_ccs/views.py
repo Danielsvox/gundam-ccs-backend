@@ -45,3 +45,44 @@ def api_info(request):
             'redoc': '/api/redoc/'
         }
     }, status=status.HTTP_200_OK)
+
+
+@api_view(['GET'])
+@permission_classes([AllowAny])
+def auth_health_check(request):
+    """
+    Authentication health check endpoint to verify JWT authentication status
+    """
+    auth_header = request.META.get('HTTP_AUTHORIZATION', '')
+
+    if not auth_header.startswith('Bearer '):
+        return Response({
+            'status': 'no_token',
+            'message': 'No authentication token provided',
+            'authenticated': False
+        }, status=status.HTTP_401_UNAUTHORIZED)
+
+    try:
+        from rest_framework_simplejwt.authentication import JWTAuthentication
+        jwt_auth = JWTAuthentication()
+        validated_token = jwt_auth.get_validated_token(
+            jwt_auth.get_raw_token(request)
+        )
+        user = jwt_auth.get_user(validated_token)
+
+        return Response({
+            'status': 'authenticated',
+            'message': 'Token is valid',
+            'authenticated': True,
+            'user_id': user.id,
+            'user_email': user.email,
+            'token_exp': validated_token.get('exp')
+        }, status=status.HTTP_200_OK)
+
+    except Exception as e:
+        return Response({
+            'status': 'invalid_token',
+            'message': 'Token is invalid or expired',
+            'authenticated': False,
+            'error': str(e)
+        }, status=status.HTTP_401_UNAUTHORIZED)

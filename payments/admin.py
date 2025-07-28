@@ -8,11 +8,12 @@ class PaymentAdmin(admin.ModelAdmin):
     """Payment admin."""
 
     list_display = ('id', 'order', 'user', 'amount', 'currency',
-                    'payment_method', 'status', 'created_at')
+                    'payment_method', 'status', 'created_at', 'payment_actions')
     list_filter = ('payment_method', 'status', 'currency', 'created_at')
     search_fields = ('order__order_number', 'user__email',
                      'stripe_payment_intent_id', 'stripe_charge_id')
     ordering = ('-created_at',)
+    actions = ['confirm_manual_payments', 'mark_payments_failed']
 
     fieldsets = (
         ('Order & User', {'fields': ('order', 'user')}),
@@ -31,6 +32,62 @@ class PaymentAdmin(admin.ModelAdmin):
     def get_queryset(self, request):
         """Optimize queryset with related fields."""
         return super().get_queryset(request).select_related('order', 'user')
+
+    def payment_actions(self, obj):
+        """Display payment action buttons."""
+        if obj.payment_method == 'manual' and obj.status == 'pending':
+            return format_html(
+                '<a class="button" href="{}">Confirm Payment</a>',
+                f'/admin/payments/payment/{obj.id}/confirm-manual-payment/'
+            )
+        return '-'
+    payment_actions.short_description = 'Actions'
+
+    def confirm_manual_payments(self, request, queryset):
+        """Confirm selected manual payments."""
+        manual_payments = queryset.filter(
+            payment_method='manual', status='pending')
+
+        confirmed_count = 0
+        for payment in manual_payments:
+            try:
+                # Update payment status
+                payment.status = 'succeeded'
+                payment.save()
+
+                # Update order status
+                order = payment.order
+                order.payment_status = 'paid'
+                order.status = 'confirmed'
+                order.save()
+
+                # Create status history entry
+                from orders.models import OrderStatusHistory
+                OrderStatusHistory.objects.create(
+                    order=order,
+                    status='confirmed',
+                    notes='Manual payment confirmed via admin'
+                )
+
+                # Send WhatsApp notification
+                from .services import payment_processor
+                payment_processor.process_successful_payment(order, payment)
+
+                confirmed_count += 1
+            except Exception as e:
+                self.message_user(
+                    request, f'Error confirming payment {payment.id}: {str(e)}', level='ERROR')
+
+        self.message_user(
+            request, f'Successfully confirmed {confirmed_count} manual payments.')
+    confirm_manual_payments.short_description = "Confirm selected manual payments"
+
+    def mark_payments_failed(self, request, queryset):
+        """Mark selected payments as failed."""
+        updated = queryset.update(status='failed')
+        self.message_user(
+            request, f'Successfully marked {updated} payments as failed.')
+    mark_payments_failed.short_description = "Mark selected payments as failed"
 
 
 @admin.register(Refund)

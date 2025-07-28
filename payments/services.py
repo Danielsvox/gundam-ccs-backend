@@ -95,6 +95,11 @@ class WhatsAppNotificationService:
             for item in order.items.all()
         ])
 
+        # Check if this is a manual payment order
+        payment_method = "Manual Payment" if order.payments.filter(
+            payment_method='manual').exists() else "Online Payment"
+        payment_status_note = "⚠️ MANUAL PAYMENT REQUIRED" if payment_method == "Manual Payment" else ""
+
         message = f"""🛒 *NEW ORDER RECEIVED*
 
 📋 *Order Details:*
@@ -112,6 +117,9 @@ Shipping: ${order.shipping_amount}
 Discount: ${order.discount_amount}
 *Total: ${order.total_amount}*
 
+💳 *Payment Method:* {payment_method}
+{payment_status_note}
+
 📍 *Shipping Address:*
 {self._format_address(order.shipping_address)}
 
@@ -128,7 +136,25 @@ Please process this order as soon as possible! 🚀"""
 
     def _format_payment_message(self, order, payment):
         """Format payment confirmation message."""
-        message = f"""💳 *PAYMENT CONFIRMED*
+        if payment.payment_method == 'manual':
+            message = f"""💳 *MANUAL PAYMENT RECEIVED*
+
+📋 *Order Details:*
+Order #: {order.order_number}
+Customer: {order.user.get_full_name() or order.user.email}
+
+💰 *Payment Information:*
+Amount: ${payment.amount}
+Method: Manual Payment
+Status: {payment.get_status_display()}
+
+✅ *Order Status:*
+Order Status: {order.status.title()}
+Payment Status: {order.payment_status.title()}
+
+The customer has provided manual payment for their order. You can now proceed with processing and shipping! 📦"""
+        else:
+            message = f"""💳 *PAYMENT CONFIRMED*
 
 📋 *Order Details:*
 Order #: {order.order_number}

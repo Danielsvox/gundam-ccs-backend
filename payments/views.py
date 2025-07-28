@@ -161,12 +161,12 @@ class ConfirmPaymentView(APIView):
 
 
 class CheckoutView(APIView):
-    """Complete checkout process - create order and payment intent."""
+    """Complete checkout process - create order for manual payment."""
 
     permission_classes = [permissions.IsAuthenticated]
 
     def post(self, request):
-        """Process checkout and create order."""
+        """Process checkout and create order for manual payment."""
         try:
             # Get user's cart
             cart, created = Cart.objects.get_or_create(user=request.user)
@@ -247,49 +247,32 @@ class CheckoutView(APIView):
                 order.applied_coupon = applied_coupons.first().coupon
                 order.save()
 
-            # Create payment intent
-            intent = stripe.PaymentIntent.create(
-                amount=int(total_amount * 100),  # Convert to cents
-                currency='usd',
-                metadata={
-                    'order_id': order.id,
-                    'order_number': order.order_number,
-                    'user_id': request.user.id
-                },
-                description=f"Order {order.order_number} - Gundam CCS"
-            )
-
-            # Create payment record
+            # Create manual payment record (no Stripe integration)
             payment = Payment.objects.create(
                 order=order,
                 user=request.user,
                 amount=total_amount,
                 currency='USD',
-                payment_method='stripe',
-                status='pending',
-                stripe_payment_intent_id=intent.id
+                payment_method='manual',
+                status='pending'
             )
 
             # Clear cart after successful order creation
             cart.clear()
 
-            # Send initial order notification
+            # Send WhatsApp notification for new order
             payment_processor.process_new_order(order)
 
             return Response({
                 'order_id': order.id,
                 'order_number': order.order_number,
-                'client_secret': intent.client_secret,
-                'payment_intent_id': intent.id,
                 'amount': total_amount,
-                'message': 'Order created successfully!'
+                'payment_status': 'pending',
+                'payment_method': 'manual',
+                'message': 'Order created successfully! Payment will be processed manually.',
+                'success': True
             })
 
-        except stripe.error.StripeError as e:
-            logger.error(f"Stripe error in checkout: {str(e)}")
-            return Response({
-                'error': 'Payment processing error. Please try again.'
-            }, status=status.HTTP_400_BAD_REQUEST)
         except Exception as e:
             logger.error(f"Error in checkout process: {str(e)}")
             return Response({
@@ -436,6 +419,55 @@ def handle_refund(charge):
         logger.error(f"Payment not found for charge {charge['id']}")
     except Exception as e:
         logger.error(f"Error handling refund: {str(e)}")
+
+
+@api_view(['POST'])
+@permission_classes([permissions.IsAuthenticated])
+def confirm_manual_payment(request):
+    """Confirm manual payment for an order."""
+    try:
+        order_id = request.data.get('order_id')
+        if not order_id:
+            return Response({
+                'error': 'Order ID is required.'
+            }, status=status.HTTP_400_BAD_REQUEST)
+
+        # Get the order and payment
+        order = get_object_or_404(Order, id=order_id)
+        payment = get_object_or_404(
+            Payment, order=order, payment_method='manual')
+
+        # Update payment status
+        payment.status = 'succeeded'
+        payment.save()
+
+        # Update order status
+        order.payment_status = 'paid'
+        order.status = 'confirmed'
+        order.save()
+
+        # Create status history entry
+        from orders.models import OrderStatusHistory
+        OrderStatusHistory.objects.create(
+            order=order,
+            status='confirmed',
+            notes='Manual payment confirmed by business owner'
+        )
+
+        # Send WhatsApp notification
+        payment_processor.process_successful_payment(order, payment)
+
+        return Response({
+            'message': 'Manual payment confirmed successfully!',
+            'order_number': order.order_number,
+            'status': 'success'
+        })
+
+    except Exception as e:
+        logger.error(f"Error confirming manual payment: {str(e)}")
+        return Response({
+            'error': 'An unexpected error occurred.'
+        }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
 
 @api_view(['GET'])

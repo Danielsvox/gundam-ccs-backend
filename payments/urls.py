@@ -10,6 +10,8 @@ urlpatterns = [
          name='create_payment_intent'),
     path('confirm-payment/', views.ConfirmPaymentView.as_view(),
          name='confirm_payment'),
+    path('confirm-manual-payment/', views.confirm_manual_payment,
+         name='confirm_manual_payment'),
 
     # Payment Methods
     path('payment-methods/', views.PaymentMethodListView.as_view(),

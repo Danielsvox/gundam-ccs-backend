@@ -4,6 +4,7 @@ from rest_framework.response import Response
 from rest_framework.views import APIView
 from django.shortcuts import get_object_or_404
 from django.db import transaction
+import logging
 
 from .models import Cart, CartItem, CartCoupon, AppliedCoupon
 from .serializers import (
@@ -11,6 +12,8 @@ from .serializers import (
     CartItemUpdateSerializer, CartCouponSerializer, AppliedCouponSerializer,
     ApplyCouponSerializer, CartSummarySerializer
 )
+
+logger = logging.getLogger(__name__)
 
 
 class CartView(APIView):
@@ -20,9 +23,17 @@ class CartView(APIView):
 
     def get(self, request):
         """Get user's cart."""
-        cart, created = Cart.objects.get_or_create(user=request.user)
-        serializer = CartSerializer(cart)
-        return Response(serializer.data)
+        try:
+            cart, created = Cart.objects.get_or_create(user=request.user)
+            serializer = CartSerializer(cart)
+            return Response(serializer.data)
+        except Exception as e:
+            logger.error(
+                f"Error fetching cart for user {request.user.id}: {str(e)}")
+            return Response({
+                'error': 'Failed to fetch cart',
+                'message': 'An error occurred while loading your cart.'
+            }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
     def delete(self, request):
         """Clear user's cart."""
@@ -32,6 +43,13 @@ class CartView(APIView):
             return Response({'message': 'Cart cleared successfully.'}, status=status.HTTP_200_OK)
         except Cart.DoesNotExist:
             return Response({'message': 'Cart is already empty.'}, status=status.HTTP_200_OK)
+        except Exception as e:
+            logger.error(
+                f"Error clearing cart for user {request.user.id}: {str(e)}")
+            return Response({
+                'error': 'Failed to clear cart',
+                'message': 'An error occurred while clearing your cart.'
+            }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
 
 class CartSummaryView(APIView):
