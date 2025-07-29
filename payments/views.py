@@ -902,8 +902,12 @@ class PagoMovilVerificationCreateView(APIView):
             if serializer.is_valid():
                 # Get current exchange rate
                 from .services.exchange_rate_service import exchange_rate_service
-                rate_data = exchange_rate_service.get_current_rate()
-                exchange_rate = rate_data['usd_to_ves'] if rate_data else Decimal('38.0')
+                try:
+                    rate_data = exchange_rate_service.get_current_rate()
+                    exchange_rate = Decimal(str(rate_data['usd_to_ves'])) if rate_data else Decimal('38.0')
+                except Exception as e:
+                    logger.warning(f"Failed to get current exchange rate: {str(e)}")
+                    exchange_rate = Decimal('38.0')
                 
                 # Create verification request
                 verification_request = serializer.save(
@@ -911,8 +915,11 @@ class PagoMovilVerificationCreateView(APIView):
                     exchange_rate_used=exchange_rate
                 )
                 
-                # Send WhatsApp notification to admin
-                self._send_admin_notification(verification_request)
+                # Send WhatsApp notification to admin (non-blocking)
+                try:
+                    self._send_admin_notification(verification_request)
+                except Exception as e:
+                    logger.warning(f"WhatsApp notification failed but continuing: {str(e)}")
                 
                 # Return the created request
                 response_serializer = PagoMovilVerificationRequestSerializer(verification_request)

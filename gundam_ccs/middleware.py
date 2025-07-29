@@ -8,6 +8,31 @@ from django.utils.deprecation import MiddlewareMixin
 logger = logging.getLogger(__name__)
 
 
+class APIHeadersMiddleware(MiddlewareMixin):
+    """
+    Middleware to add API-specific headers for better cross-origin compatibility.
+    """
+    
+    def process_response(self, request, response):
+        """Add API headers to all responses."""
+        # Add API version header
+        response['X-API-Version'] = '1.0'
+        
+        # Add security headers for API responses
+        if request.path.startswith('/api/'):
+            response['X-Content-Type-Options'] = 'nosniff'
+            response['X-Frame-Options'] = 'DENY'
+            response['Cache-Control'] = 'no-cache, no-store, must-revalidate'
+            response['Pragma'] = 'no-cache'
+            response['Expires'] = '0'
+            
+            # Add JSON content type for API responses if not set
+            if not response.get('Content-Type'):
+                response['Content-Type'] = 'application/json'
+        
+        return response
+
+
 class JWTAuthenticationMiddleware(MiddlewareMixin):
     """
     Custom middleware to handle JWT authentication errors gracefully
@@ -68,6 +93,10 @@ class JWTAuthenticationMiddleware(MiddlewareMixin):
             '/api/v1/accounts/token/refresh/',
             '/api/v1/accounts/password-reset/',
             '/api/v1/accounts/email-verify/',
+            '/api/v1/payments/pagomovil/info/',  # Allow anonymous access
+            '/api/v1/payments/pagomovil/banks/',  # Allow anonymous access
+            '/api/v1/payments/pagomovil/recipients/',  # Allow anonymous access
+            '/api/v1/payments/exchange-rate/',  # Allow anonymous access
             '/media/',
             '/static/',
         ]

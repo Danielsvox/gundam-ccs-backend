@@ -55,15 +55,16 @@ class ExchangeRateLogAdmin(admin.ModelAdmin):
 
     def rate_display(self, obj):
         """Display rate with formatting."""
+        rate_value = float(obj.usd_to_ves) if obj.usd_to_ves else 0
         if obj.fetch_success:
             return format_html(
-                '<strong>{} VES</strong>',
-                obj.usd_to_ves
+                '<strong>{:.4f} VES</strong>',
+                rate_value
             )
         else:
             return format_html(
-                '<span style="color: red;">{} VES (Failed)</span>',
-                obj.usd_to_ves
+                '<span style="color: red;">{:.4f} VES (Failed)</span>',
+                rate_value
             )
     rate_display.short_description = 'Rate (USD → VES)'
 
@@ -85,10 +86,13 @@ class ExchangeRateLogAdmin(admin.ModelAdmin):
         if obj.change_percentage is None:
             return '-'
 
-        if obj.change_percentage > 0:
+        # Ensure we have a numeric value
+        percentage = float(obj.change_percentage)
+        
+        if percentage > 0:
             color = 'green'
             icon = '📈'
-        elif obj.change_percentage < 0:
+        elif percentage < 0:
             color = 'red'
             icon = '📉'
         else:
@@ -97,7 +101,7 @@ class ExchangeRateLogAdmin(admin.ModelAdmin):
 
         return format_html(
             '<span style="color: {};">{} {:.2f}%</span>',
-            color, icon, obj.change_percentage
+            color, icon, percentage
         )
     change_percentage_display.short_description = 'Change %'
 

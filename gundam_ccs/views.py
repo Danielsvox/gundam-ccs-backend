@@ -1,88 +1,77 @@
 from django.http import JsonResponse
-from django.views.decorators.csrf import csrf_exempt
-from django.utils.decorators import method_decorator
 from django.views import View
-from rest_framework.decorators import api_view, permission_classes
-from rest_framework.permissions import AllowAny
-from rest_framework.response import Response
-from rest_framework import status
-import os
-from django.conf import settings
+from django.utils.decorators import method_decorator
+from django.views.decorators.csrf import csrf_exempt
+import json
 
 
-@api_view(['GET'])
-@permission_classes([AllowAny])
-def health_check(request):
+@method_decorator(csrf_exempt, name='dispatch')
+class HealthCheckView(View):
     """
-    Health check endpoint to verify the API is running
+    Simple health check endpoint to test CORS and API connectivity.
     """
-    return Response({
-        'status': 'healthy',
-        'message': 'Gundam CCS API is running',
-        'version': '1.0.0',
-        'environment': 'development' if settings.DEBUG else 'production'
-    }, status=status.HTTP_200_OK)
+    
+    def get(self, request):
+        """Return API health status."""
+        return JsonResponse({
+            'status': 'healthy',
+            'message': 'Gundam CCS API is running',
+            'version': '1.0',
+            'cors_enabled': True,
+            'timestamp': request.GET.get('timestamp', 'not_provided')
+        })
+    
+    def post(self, request):
+        """Test POST request handling."""
+        try:
+            if request.content_type == 'application/json':
+                data = json.loads(request.body)
+            else:
+                data = dict(request.POST)
+            
+            return JsonResponse({
+                'status': 'success',
+                'message': 'POST request received',
+                'received_data': data,
+                'cors_enabled': True
+            })
+        except Exception as e:
+            return JsonResponse({
+                'status': 'error',
+                'message': str(e)
+            }, status=400)
 
 
-@api_view(['GET'])
-@permission_classes([AllowAny])
-def api_info(request):
+class CORSTestView(View):
     """
-    API information endpoint
+    Dedicated CORS test endpoint.
     """
-    return Response({
-        'name': 'Gundam CCS API',
-        'description': 'E-commerce platform for Gundam model kits',
-        'version': '1.0.0',
-        'endpoints': {
-            'accounts': '/api/v1/accounts/',
-            'products': '/api/v1/products/',
-            'cart': '/api/v1/cart/',
-            'orders': '/api/v1/orders/',
-            'payments': '/api/v1/payments/',
-            'wishlist': '/api/v1/wishlist/',
-            'docs': '/api/docs/',
-            'redoc': '/api/redoc/'
-        }
-    }, status=status.HTTP_200_OK)
-
-
-@api_view(['GET'])
-@permission_classes([AllowAny])
-def auth_health_check(request):
-    """
-    Authentication health check endpoint to verify JWT authentication status
-    """
-    auth_header = request.META.get('HTTP_AUTHORIZATION', '')
-
-    if not auth_header.startswith('Bearer '):
-        return Response({
-            'status': 'no_token',
-            'message': 'No authentication token provided',
-            'authenticated': False
-        }, status=status.HTTP_401_UNAUTHORIZED)
-
-    try:
-        from rest_framework_simplejwt.authentication import JWTAuthentication
-        jwt_auth = JWTAuthentication()
-        validated_token = jwt_auth.get_validated_token(
-            jwt_auth.get_raw_token(request)
-        )
-        user = jwt_auth.get_user(validated_token)
-
-        return Response({
-            'status': 'authenticated',
-            'message': 'Token is valid',
-            'authenticated': True,
-            'user_id': user.id,
-            'user_email': user.email,
-            'token_exp': validated_token.get('exp')
-        }, status=status.HTTP_200_OK)
-
-    except Exception as e:
-        return Response({
-            'status': 'invalid_token',
-            'message': 'Token is invalid or expired',
-            'authenticated': False,
-            'error': str(e)
-        }, status=status.HTTP_401_UNAUTHORIZED)
+    
+    def get(self, request):
+        """Test CORS GET request."""
+        origin = request.META.get('HTTP_ORIGIN', 'no-origin')
+        user_agent = request.META.get('HTTP_USER_AGENT', 'no-user-agent')
+        
+        return JsonResponse({
+            'cors_test': 'success',
+            'origin': origin,
+            'user_agent': user_agent,
+            'headers': dict(request.headers),
+            'method': 'GET'
+        })
+    
+    def post(self, request):
+        """Test CORS POST request."""
+        origin = request.META.get('HTTP_ORIGIN', 'no-origin')
+        
+        return JsonResponse({
+            'cors_test': 'success',
+            'origin': origin,
+            'method': 'POST',
+            'content_type': request.content_type
+        })
+    
+    def options(self, request):
+        """Handle CORS preflight requests."""
+        response = JsonResponse({'cors_preflight': 'success'})
+        return response

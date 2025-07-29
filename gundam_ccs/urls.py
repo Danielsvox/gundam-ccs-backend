@@ -41,10 +41,9 @@ urlpatterns = [
     # Admin
     path('admin/', admin.site.urls),
 
-    # Health Check and API Info
-    path('api/health/', views.health_check, name='health_check'),
-    path('api/auth-health/', views.auth_health_check, name='auth_health_check'),
-    path('api/info/', views.api_info, name='api_info'),
+    # Health Check and CORS Test
+    path('api/health/', views.HealthCheckView.as_view(), name='health_check'),
+    path('api/cors-test/', views.CORSTestView.as_view(), name='cors_test'),
 
     # API Documentation
     path('api/docs/', schema_view.with_ui('swagger',
