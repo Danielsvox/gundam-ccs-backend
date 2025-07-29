@@ -176,6 +176,7 @@ staticfiles/
 .env.development
 .env.test
 .env.production
+env.example
 
 # OS generated files
 .DS_Store
