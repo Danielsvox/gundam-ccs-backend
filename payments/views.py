@@ -20,6 +20,15 @@ from .serializers import (
 from .services import payment_processor, whatsapp_service
 from orders.models import Order, OrderItem
 from cart.models import Cart
+from .services.exchange_rate_service import exchange_rate_service
+from .serializers import (
+    ExchangeRateSerializer, ExchangeRateCurrentSerializer, ExchangeRateHistorySerializer,
+    ManualRateSetSerializer, CurrencyConversionSerializer, CurrencyConversionResponseSerializer,
+    ExchangeRateAlertSerializer, ExchangeRateSnapshotSerializer
+)
+from .models import ExchangeRateLog, ExchangeRateAlert, ExchangeRateSnapshot
+from decimal import Decimal
+from django.utils import timezone
 
 logger = logging.getLogger(__name__)
 
@@ -488,3 +497,337 @@ def create_payment_method(request):
         serializer.save(user=request.user)
         return Response(serializer.data, status=status.HTTP_201_CREATED)
     return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
+
+class ExchangeRateCurrentView(APIView):
+    """Get current USD to VES exchange rate."""
+    
+    permission_classes = [permissions.AllowAny]
+    
+    def get(self, request):
+        """Get current exchange rate."""
+        try:
+            force_fetch = request.query_params.get('force_fetch', 'false').lower() == 'true'
+            rate_data = exchange_rate_service.get_current_rate(force_fetch=force_fetch)
+            
+            if rate_data:
+                return Response(rate_data)
+            else:
+                return Response({
+                    'error': 'Unable to fetch current exchange rate'
+                }, status=status.HTTP_503_SERVICE_UNAVAILABLE)
+                
+        except Exception as e:
+            logger.error(f"Error getting current exchange rate: {str(e)}")
+            return Response({
+                'error': 'An error occurred while fetching exchange rate'
+            }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+
+class ExchangeRateHistoryView(generics.ListAPIView):
+    """Get exchange rate history with filtering and pagination."""
+    
+    permission_classes = [permissions.AllowAny]
+    serializer_class = ExchangeRateHistorySerializer
+    pagination_class = None  # Use default pagination
+    
+    def get_queryset(self):
+        """Get filtered exchange rate history."""
+        queryset = ExchangeRateLog.objects.all()
+        
+        # Filter by date range
+        start_date = self.request.query_params.get('start_date')
+        end_date = self.request.query_params.get('end_date')
+        
+        if start_date:
+            try:
+                start_date = timezone.datetime.fromisoformat(start_date.replace('Z', '+00:00'))
+                queryset = queryset.filter(timestamp__gte=start_date)
+            except ValueError:
+                pass
+        
+        if end_date:
+            try:
+                end_date = timezone.datetime.fromisoformat(end_date.replace('Z', '+00:00'))
+                queryset = queryset.filter(timestamp__lte=end_date)
+            except ValueError:
+                pass
+        
+        # Filter by source
+        source = self.request.query_params.get('source')
+        if source:
+            queryset = queryset.filter(source=source)
+        
+        # Filter by fetch success
+        fetch_success = self.request.query_params.get('fetch_success')
+        if fetch_success is not None:
+            queryset = queryset.filter(fetch_success=fetch_success.lower() == 'true')
+        
+        return queryset.order_by('-timestamp')
+
+
+class ExchangeRateAtTimestampView(APIView):
+    """Get exchange rate that was active at a specific timestamp."""
+    
+    permission_classes = [permissions.AllowAny]
+    
+    def get(self, request):
+        """Get exchange rate at specific timestamp."""
+        try:
+            timestamp_str = request.query_params.get('timestamp')
+            if not timestamp_str:
+                return Response({
+                    'error': 'timestamp parameter is required'
+                }, status=status.HTTP_400_BAD_REQUEST)
+            
+            try:
+                timestamp = timezone.datetime.fromisoformat(timestamp_str.replace('Z', '+00:00'))
+            except ValueError:
+                return Response({
+                    'error': 'Invalid timestamp format. Use ISO format.'
+                }, status=status.HTTP_400_BAD_REQUEST)
+            
+            rate_log = ExchangeRateLog.get_rate_at_timestamp(timestamp)
+            
+            if rate_log:
+                serializer = ExchangeRateSerializer(rate_log)
+                return Response(serializer.data)
+            else:
+                return Response({
+                    'error': 'No exchange rate found for the specified timestamp'
+                }, status=status.HTTP_404_NOT_FOUND)
+                
+        except Exception as e:
+            logger.error(f"Error getting exchange rate at timestamp: {str(e)}")
+            return Response({
+                'error': 'An error occurred while fetching historical rate'
+            }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+
+class CurrencyConversionView(APIView):
+    """Convert between USD and VES currencies."""
+    
+    permission_classes = [permissions.AllowAny]
+    
+    def post(self, request):
+        """Convert currency amount."""
+        try:
+            serializer = CurrencyConversionSerializer(data=request.data)
+            if serializer.is_valid():
+                data = serializer.validated_data
+                
+                amount = data['amount']
+                from_currency = data['from_currency']
+                to_currency = data['to_currency']
+                specific_rate = data.get('rate')
+                
+                # Get current rate if not provided
+                if specific_rate:
+                    rate = Decimal(str(specific_rate))
+                    rate_source = 'manual'
+                else:
+                    rate_data = exchange_rate_service.get_current_rate()
+                    if not rate_data:
+                        return Response({
+                            'error': 'Unable to fetch current exchange rate'
+                        }, status=status.HTTP_503_SERVICE_UNAVAILABLE)
+                    
+                    rate = Decimal(str(rate_data['usd_to_ves']))
+                    rate_source = rate_data['source']
+                
+                # Perform conversion
+                if from_currency == 'USD' and to_currency == 'VES':
+                    converted_amount = exchange_rate_service.convert_usd_to_ves(amount, rate)
+                elif from_currency == 'VES' and to_currency == 'USD':
+                    converted_amount = exchange_rate_service.convert_ves_to_usd(amount, rate)
+                else:
+                    return Response({
+                        'error': 'Invalid currency combination'
+                    }, status=status.HTTP_400_BAD_REQUEST)
+                
+                response_data = {
+                    'original_amount': amount,
+                    'converted_amount': round(converted_amount, 2),
+                    'from_currency': from_currency,
+                    'to_currency': to_currency,
+                    'exchange_rate': rate,
+                    'rate_source': rate_source,
+                    'conversion_timestamp': timezone.now()
+                }
+                
+                response_serializer = CurrencyConversionResponseSerializer(response_data)
+                return Response(response_serializer.data)
+            
+            return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+            
+        except Exception as e:
+            logger.error(f"Error in currency conversion: {str(e)}")
+            return Response({
+                'error': 'An error occurred during currency conversion'
+            }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+
+class ManualRateSetView(APIView):
+    """Set manual exchange rate (admin only)."""
+    
+    permission_classes = [permissions.IsAuthenticated, permissions.IsAdminUser]
+    
+    def post(self, request):
+        """Set manual exchange rate."""
+        try:
+            serializer = ManualRateSetSerializer(data=request.data)
+            if serializer.is_valid():
+                rate = serializer.validated_data['rate']
+                
+                # Set manual rate
+                rate_data = exchange_rate_service.set_manual_rate(rate, request.user)
+                
+                return Response({
+                    'message': 'Manual exchange rate set successfully',
+                    'rate_data': rate_data
+                })
+            
+            return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+            
+        except Exception as e:
+            logger.error(f"Error setting manual rate: {str(e)}")
+            return Response({
+                'error': 'An error occurred while setting manual rate'
+            }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+
+class ExchangeRateRefreshView(APIView):
+    """Force refresh exchange rate from external sources."""
+    
+    permission_classes = [permissions.IsAuthenticated]
+    
+    def post(self, request):
+        """Force refresh exchange rate."""
+        try:
+            rate_data = exchange_rate_service.fetch_and_store_rate()
+            
+            if rate_data:
+                return Response({
+                    'message': 'Exchange rate refreshed successfully',
+                    'rate_data': rate_data
+                })
+            else:
+                return Response({
+                    'error': 'Failed to refresh exchange rate'
+                }, status=status.HTTP_503_SERVICE_UNAVAILABLE)
+                
+        except Exception as e:
+            logger.error(f"Error refreshing exchange rate: {str(e)}")
+            return Response({
+                'error': 'An error occurred while refreshing exchange rate'
+            }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+
+class ExchangeRateAlertsView(generics.ListAPIView):
+    """List exchange rate alerts."""
+    
+    permission_classes = [permissions.IsAuthenticated, permissions.IsAdminUser]
+    serializer_class = ExchangeRateAlertSerializer
+    
+    def get_queryset(self):
+        """Get filtered alerts."""
+        queryset = ExchangeRateAlert.objects.all()
+        
+        # Filter by acknowledgment status
+        acknowledged = self.request.query_params.get('acknowledged')
+        if acknowledged is not None:
+            queryset = queryset.filter(acknowledged=acknowledged.lower() == 'true')
+        
+        # Filter by alert type
+        alert_type = self.request.query_params.get('alert_type')
+        if alert_type:
+            queryset = queryset.filter(alert_type=alert_type)
+        
+        return queryset.order_by('-created_at')
+
+
+class ExchangeRateAlertAcknowledgeView(APIView):
+    """Acknowledge exchange rate alert."""
+    
+    permission_classes = [permissions.IsAuthenticated, permissions.IsAdminUser]
+    
+    def post(self, request, alert_id):
+        """Acknowledge alert."""
+        try:
+            alert = ExchangeRateAlert.objects.get(id=alert_id)
+            alert.acknowledged = True
+            alert.acknowledged_by = request.user
+            alert.acknowledged_at = timezone.now()
+            alert.save()
+            
+            serializer = ExchangeRateAlertSerializer(alert)
+            return Response({
+                'message': 'Alert acknowledged successfully',
+                'alert': serializer.data
+            })
+            
+        except ExchangeRateAlert.DoesNotExist:
+            return Response({
+                'error': 'Alert not found'
+            }, status=status.HTTP_404_NOT_FOUND)
+        except Exception as e:
+            logger.error(f"Error acknowledging alert: {str(e)}")
+            return Response({
+                'error': 'An error occurred while acknowledging alert'
+            }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+
+class ExchangeRateStatsView(APIView):
+    """Get exchange rate statistics."""
+    
+    permission_classes = [permissions.AllowAny]
+    
+    def get(self, request):
+        """Get exchange rate statistics."""
+        try:
+            # Get date range from query params (default to last 30 days)
+            days = int(request.query_params.get('days', 30))
+            start_date = timezone.now() - timezone.timedelta(days=days)
+            
+            rates = ExchangeRateLog.objects.filter(
+                timestamp__gte=start_date,
+                fetch_success=True
+            ).order_by('timestamp')
+            
+            if not rates.exists():
+                return Response({
+                    'error': 'No rate data available for the specified period'
+                }, status=status.HTTP_404_NOT_FOUND)
+            
+            rates_values = [float(rate.usd_to_ves) for rate in rates]
+            
+            stats = {
+                'period_days': days,
+                'total_updates': rates.count(),
+                'current_rate': rates_values[-1] if rates_values else None,
+                'highest_rate': max(rates_values) if rates_values else None,
+                'lowest_rate': min(rates_values) if rates_values else None,
+                'average_rate': sum(rates_values) / len(rates_values) if rates_values else None,
+                'total_change': rates_values[-1] - rates_values[0] if len(rates_values) > 1 else 0,
+                'total_change_percentage': ((rates_values[-1] - rates_values[0]) / rates_values[0] * 100) if len(rates_values) > 1 else 0,
+                'successful_fetches': rates.filter(fetch_success=True).count(),
+                'failed_fetches': ExchangeRateLog.objects.filter(
+                    timestamp__gte=start_date,
+                    fetch_success=False
+                ).count(),
+                'source_breakdown': {}
+            }
+            
+            # Get source breakdown
+            from django.db.models import Count
+            source_stats = rates.values('source').annotate(count=Count('source'))
+            for stat in source_stats:
+                stats['source_breakdown'][stat['source']] = stat['count']
+            
+            return Response(stats)
+            
+        except Exception as e:
+            logger.error(f"Error getting exchange rate stats: {str(e)}")
+            return Response({
+                'error': 'An error occurred while fetching statistics'
+            }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)

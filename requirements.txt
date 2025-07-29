@@ -10,4 +10,6 @@ python-decouple==3.8
 drf-yasg==1.21.7
 django-filter==23.5
 redis==5.0.1
-django-redis==5.4.0 
+django-redis==5.4.0
+requests==2.31.0
+beautifulsoup4==4.12.2 

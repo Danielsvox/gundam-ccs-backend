@@ -181,14 +181,22 @@ REST_FRAMEWORK = {
         'rest_framework.filters.SearchFilter',
         'rest_framework.filters.OrderingFilter',
     ),
-    'DEFAULT_THROTTLE_CLASSES': [
+}
+
+# Rate limiting configuration
+if DEBUG:
+    # Disable throttling in development
+    REST_FRAMEWORK['DEFAULT_THROTTLE_CLASSES'] = []
+    REST_FRAMEWORK['DEFAULT_THROTTLE_RATES'] = {}
+else:
+    # Enable throttling in production
+    REST_FRAMEWORK['DEFAULT_THROTTLE_CLASSES'] = [
         'rest_framework.throttling.AnonRateThrottle',
         'rest_framework.throttling.UserRateThrottle'
-    ],
-    'DEFAULT_THROTTLE_RATES': {
-        'anon': '100/hour',
-        'user': '1000/hour',
-    }
+    ]
+    REST_FRAMEWORK['DEFAULT_THROTTLE_RATES'] = {
+        'anon': '1000/hour',
+        'user': '10000/hour',
 }
 
 # JWT Configuration

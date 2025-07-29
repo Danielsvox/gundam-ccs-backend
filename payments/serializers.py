@@ -1,5 +1,5 @@
 from rest_framework import serializers
-from .models import Payment, PaymentMethod, Refund, WebhookEvent
+from .models import Payment, PaymentMethod, Refund, WebhookEvent, ExchangeRateLog, ExchangeRateAlert, ExchangeRateSnapshot
 
 
 class PaymentSerializer(serializers.ModelSerializer):
@@ -289,3 +289,131 @@ class PaymentMethodCreateSerializer(serializers.ModelSerializer):
         except Exception as e:
             raise serializers.ValidationError(
                 f"Error creating payment method: {str(e)}")
+
+
+class ExchangeRateSerializer(serializers.ModelSerializer):
+    """Serializer for exchange rate information."""
+    
+    source_display = serializers.CharField(source='get_source_display', read_only=True)
+    
+    class Meta:
+        model = ExchangeRateLog
+        fields = (
+            'id', 'usd_to_ves', 'source', 'source_display', 'timestamp',
+            'is_active', 'fetch_success', 'change_percentage'
+        )
+        read_only_fields = '__all__'
+
+
+class ExchangeRateCurrentSerializer(serializers.Serializer):
+    """Serializer for current exchange rate response."""
+    
+    usd_to_ves = serializers.DecimalField(max_digits=10, decimal_places=4)
+    last_updated = serializers.DateTimeField()
+    source = serializers.CharField()
+    change_percentage = serializers.DecimalField(max_digits=5, decimal_places=2, allow_null=True)
+
+
+class ExchangeRateHistorySerializer(serializers.ModelSerializer):
+    """Serializer for exchange rate history."""
+    
+    source_display = serializers.CharField(source='get_source_display', read_only=True)
+    
+    class Meta:
+        model = ExchangeRateLog
+        fields = (
+            'id', 'usd_to_ves', 'source', 'source_display', 'timestamp',
+            'change_percentage', 'fetch_success', 'error_message'
+        )
+        read_only_fields = '__all__'
+
+
+class ManualRateSetSerializer(serializers.Serializer):
+    """Serializer for setting manual exchange rate."""
+    
+    rate = serializers.DecimalField(
+        max_digits=10,
+        decimal_places=4,
+        min_value=1,
+        max_value=100000,
+        help_text="Exchange rate in VES per USD"
+    )
+    
+    def validate_rate(self, value):
+        """Validate the exchange rate value."""
+        if value <= 0:
+            raise serializers.ValidationError("Exchange rate must be positive")
+        
+        # Sanity check - warn if rate seems too high or low
+        if value < 10:
+            raise serializers.ValidationError("Exchange rate seems too low. Please verify.")
+        if value > 100:
+            # Just log a warning for very high rates
+            import logging
+            logger = logging.getLogger(__name__)
+            logger.warning(f"Very high exchange rate set: {value} VES per USD")
+        
+        return value
+
+
+class CurrencyConversionSerializer(serializers.Serializer):
+    """Serializer for currency conversion requests."""
+    
+    amount = serializers.DecimalField(max_digits=15, decimal_places=2, min_value=0)
+    from_currency = serializers.ChoiceField(choices=['USD', 'VES'])
+    to_currency = serializers.ChoiceField(choices=['USD', 'VES'])
+    rate = serializers.DecimalField(
+        max_digits=10,
+        decimal_places=4,
+        required=False,
+        help_text="Optional: specific rate to use for conversion"
+    )
+    
+    def validate(self, data):
+        """Validate conversion request."""
+        if data['from_currency'] == data['to_currency']:
+            raise serializers.ValidationError("From and to currencies must be different")
+        return data
+
+
+class CurrencyConversionResponseSerializer(serializers.Serializer):
+    """Serializer for currency conversion response."""
+    
+    original_amount = serializers.DecimalField(max_digits=15, decimal_places=2)
+    converted_amount = serializers.DecimalField(max_digits=15, decimal_places=2)
+    from_currency = serializers.CharField()
+    to_currency = serializers.CharField()
+    exchange_rate = serializers.DecimalField(max_digits=10, decimal_places=4)
+    rate_source = serializers.CharField()
+    conversion_timestamp = serializers.DateTimeField()
+
+
+class ExchangeRateAlertSerializer(serializers.ModelSerializer):
+    """Serializer for exchange rate alerts."""
+    
+    alert_type_display = serializers.CharField(source='get_alert_type_display', read_only=True)
+    exchange_rate_details = ExchangeRateSerializer(source='exchange_rate', read_only=True)
+    acknowledged_by_email = serializers.CharField(source='acknowledged_by.email', read_only=True)
+    
+    class Meta:
+        model = ExchangeRateAlert
+        fields = (
+            'id', 'alert_type', 'alert_type_display', 'exchange_rate_details',
+            'threshold_value', 'message', 'acknowledged', 'acknowledged_by_email',
+            'acknowledged_at', 'created_at'
+        )
+        read_only_fields = (
+            'id', 'alert_type', 'exchange_rate_details', 'threshold_value',
+            'message', 'acknowledged_by_email', 'acknowledged_at', 'created_at'
+        )
+
+
+class ExchangeRateSnapshotSerializer(serializers.ModelSerializer):
+    """Serializer for exchange rate snapshots used in orders/payments."""
+    
+    class Meta:
+        model = ExchangeRateSnapshot
+        fields = (
+            'id', 'usd_to_ves', 'amount_usd', 'amount_ves', 'snapshot_timestamp'
+        )
+        read_only_fields = '__all__'

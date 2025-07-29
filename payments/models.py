@@ -234,3 +234,187 @@ class Subscription(models.Model):
         verbose_name = 'Subscription'
         verbose_name_plural = 'Subscriptions'
         ordering = ['-created_at']
+
+
+class ExchangeRateLog(models.Model):
+    """Store historical exchange rates for USD to VES conversion."""
+
+    RATE_SOURCES = [
+        ('google_finance', 'Google Finance'),
+        ('exchangerate_host', 'Exchangerate.host'),
+        ('open_exchange_rates', 'Open Exchange Rates'),
+        ('manual', 'Manual Override'),
+        ('fallback', 'Fallback Source')
+    ]
+
+    usd_to_ves = models.DecimalField(
+        max_digits=10,
+        decimal_places=4,
+        help_text="Exchange rate from USD to VES (Bolívares)"
+    )
+    source = models.CharField(
+        max_length=50,
+        choices=RATE_SOURCES,
+        default='google_finance'
+    )
+    timestamp = models.DateTimeField(auto_now_add=True)
+    is_active = models.BooleanField(
+        default=True,
+        help_text="Whether this is the current active rate"
+    )
+    fetch_success = models.BooleanField(
+        default=True,
+        help_text="Whether the rate was successfully fetched"
+    )
+    error_message = models.TextField(
+        blank=True,
+        help_text="Error message if fetch failed"
+    )
+    change_percentage = models.DecimalField(
+        max_digits=5,
+        decimal_places=2,
+        null=True,
+        blank=True,
+        help_text="Percentage change from previous rate"
+    )
+
+    class Meta:
+        verbose_name = 'Exchange Rate Log'
+        verbose_name_plural = 'Exchange Rate Logs'
+        ordering = ['-timestamp']
+        indexes = [
+            models.Index(fields=['timestamp', 'is_active']),
+            models.Index(fields=['source', 'timestamp']),
+        ]
+
+    def __str__(self):
+        return f"USD→VES: {self.usd_to_ves} ({self.source}) - {self.timestamp.strftime('%Y-%m-%d %H:%M')}"
+
+    @classmethod
+    def get_current_rate(cls):
+        """Get the current active exchange rate."""
+        try:
+            return cls.objects.filter(is_active=True, fetch_success=True).latest('timestamp')
+        except cls.DoesNotExist:
+            return None
+
+    @classmethod
+    def get_rate_at_timestamp(cls, timestamp):
+        """Get the exchange rate that was active at a specific timestamp."""
+        try:
+            return cls.objects.filter(
+                timestamp__lte=timestamp,
+                fetch_success=True
+            ).latest('timestamp')
+        except cls.DoesNotExist:
+            return None
+
+    def save(self, *args, **kwargs):
+        """Override save to calculate change percentage and manage active status."""
+        # Save first to ensure timestamp is set
+        super().save(*args, **kwargs)
+        
+        if self.fetch_success:
+            # Calculate change percentage from previous rate
+            previous_rate = ExchangeRateLog.objects.filter(
+                fetch_success=True,
+                timestamp__lt=self.timestamp
+            ).exclude(id=self.id).order_by('-timestamp').first()
+
+            if previous_rate:
+                change = ((self.usd_to_ves - previous_rate.usd_to_ves) / previous_rate.usd_to_ves) * 100
+                self.change_percentage = round(change, 2)
+                # Save again to update change_percentage
+                super().save(update_fields=['change_percentage'])
+
+            # If this is a successful rate, deactivate all other active rates
+            if self.is_active:
+                ExchangeRateLog.objects.filter(is_active=True).exclude(id=self.id).update(is_active=False)
+
+
+class ExchangeRateAlert(models.Model):
+    """Store alerts for significant exchange rate changes."""
+
+    ALERT_TYPES = [
+        ('high_change', 'High Percentage Change'),
+        ('fetch_error', 'Fetch Error'),
+        ('manual_override', 'Manual Override'),
+        ('source_fallback', 'Source Fallback')
+    ]
+
+    alert_type = models.CharField(max_length=20, choices=ALERT_TYPES)
+    exchange_rate = models.ForeignKey(
+        ExchangeRateLog,
+        on_delete=models.CASCADE,
+        related_name='alerts'
+    )
+    threshold_value = models.DecimalField(
+        max_digits=5,
+        decimal_places=2,
+        null=True,
+        blank=True,
+        help_text="Threshold value that triggered the alert"
+    )
+    message = models.TextField()
+    acknowledged = models.BooleanField(default=False)
+    acknowledged_by = models.ForeignKey(
+        'accounts.User',
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True
+    )
+    acknowledged_at = models.DateTimeField(null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        verbose_name = 'Exchange Rate Alert'
+        verbose_name_plural = 'Exchange Rate Alerts'
+        ordering = ['-created_at']
+
+    def __str__(self):
+        return f"{self.get_alert_type_display()} - {self.created_at.strftime('%Y-%m-%d %H:%M')}"
+
+
+# Add exchange rate field to existing models for historical tracking
+class ExchangeRateSnapshot(models.Model):
+    """Snapshot of exchange rate used in orders/payments for historical reference."""
+
+    order = models.OneToOneField(
+        'orders.Order',
+        on_delete=models.CASCADE,
+        null=True,
+        blank=True,
+        related_name='exchange_rate_snapshot'
+    )
+    payment = models.OneToOneField(
+        'Payment',
+        on_delete=models.CASCADE,
+        null=True,
+        blank=True,
+        related_name='exchange_rate_snapshot'
+    )
+    usd_to_ves = models.DecimalField(
+        max_digits=10,
+        decimal_places=4,
+        help_text="Exchange rate at the time of order/payment"
+    )
+    amount_usd = models.DecimalField(
+        max_digits=10,
+        decimal_places=2,
+        help_text="Amount in USD"
+    )
+    amount_ves = models.DecimalField(
+        max_digits=15,
+        decimal_places=2,
+        help_text="Equivalent amount in VES"
+    )
+    snapshot_timestamp = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        verbose_name = 'Exchange Rate Snapshot'
+        verbose_name_plural = 'Exchange Rate Snapshots'
+
+    def __str__(self):
+        entity = self.order or self.payment
+        entity_type = "Order" if self.order else "Payment"
+        return f"{entity_type} {entity.id if entity else 'N/A'} - ${self.amount_usd} = Bs. {self.amount_ves}"
