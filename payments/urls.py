@@ -34,4 +34,13 @@ urlpatterns = [
 
     # Stripe Webhook
     path('webhook/stripe/', views.stripe_webhook, name='stripe_webhook'),
+
+    # Pago Móvil Endpoints
+    path('pagomovil/info/', views.PagoMovilPaymentInfoView.as_view(), name='pagomovil_payment_info'),
+    path('pagomovil/verify/', views.PagoMovilVerificationCreateView.as_view(), name='pagomovil_verify'),
+    path('pagomovil/status/', views.PagoMovilStatusView.as_view(), name='pagomovil_status'),
+    path('pagomovil/admin/', views.PagoMovilAdminListView.as_view(), name='pagomovil_admin_list'),
+    path('pagomovil/<int:verification_id>/status/', views.PagoMovilStatusUpdateView.as_view(), name='pagomovil_status_update'),
+    path('pagomovil/banks/', views.PagoMovilBankCodeListView.as_view(), name='pagomovil_banks'),
+    path('pagomovil/recipients/', views.PagoMovilRecipientListView.as_view(), name='pagomovil_recipients'),
 ]

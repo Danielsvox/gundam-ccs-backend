@@ -1,6 +1,7 @@
 from django.db import models
 from django.contrib.auth import get_user_model
 from orders.models import Order
+from django.utils import timezone
 
 User = get_user_model()
 
@@ -418,3 +419,193 @@ class ExchangeRateSnapshot(models.Model):
         entity = self.order or self.payment
         entity_type = "Order" if self.order else "Payment"
         return f"{entity_type} {entity.id if entity else 'N/A'} - ${self.amount_usd} = Bs. {self.amount_ves}"
+
+
+class PagoMovilBankCode(models.Model):
+    """Store valid Venezuelan bank codes for Pago Móvil."""
+    
+    bank_code = models.CharField(max_length=10, unique=True)
+    bank_name = models.CharField(max_length=100)
+    is_active = models.BooleanField(default=True)
+    
+    class Meta:
+        verbose_name = 'Pago Móvil Bank Code'
+        verbose_name_plural = 'Pago Móvil Bank Codes'
+        ordering = ['bank_name']
+    
+    def __str__(self):
+        return f"{self.bank_code} - {self.bank_name}"
+
+
+class PagoMovilRecipient(models.Model):
+    """Store Pago Móvil recipient information."""
+    
+    bank_code = models.ForeignKey(
+        PagoMovilBankCode,
+        on_delete=models.CASCADE,
+        related_name='recipients'
+    )
+    recipient_id = models.CharField(
+        max_length=20,
+        help_text="Recipient ID (starts with V or J)"
+    )
+    recipient_phone = models.CharField(
+        max_length=20,
+        help_text="Registered phone number for Pago Móvil"
+    )
+    recipient_name = models.CharField(
+        max_length=100,
+        help_text="Recipient name"
+    )
+    is_active = models.BooleanField(default=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    
+    class Meta:
+        verbose_name = 'Pago Móvil Recipient'
+        verbose_name_plural = 'Pago Móvil Recipients'
+        unique_together = ['bank_code', 'recipient_id', 'recipient_phone']
+    
+    def __str__(self):
+        return f"{self.recipient_name} ({self.recipient_id}) - {self.bank_code.bank_name}"
+
+
+class PagoMovilVerificationRequest(models.Model):
+    """Store Pago Móvil verification requests."""
+    
+    STATUS_CHOICES = [
+        ('pending', 'Pending'),
+        ('approved', 'Approved'),
+        ('rejected', 'Rejected'),
+    ]
+    
+    user = models.ForeignKey(
+        'accounts.User',
+        on_delete=models.CASCADE,
+        related_name='pagomovil_requests'
+    )
+    order = models.ForeignKey(
+        'orders.Order',
+        on_delete=models.CASCADE,
+        related_name='pagomovil_requests',
+        null=True,
+        blank=True
+    )
+    
+    # Sender information
+    sender_id = models.CharField(
+        max_length=20,
+        help_text="Sender ID (e.g., V-12345678 or J-12345678-0)"
+    )
+    sender_phone = models.CharField(
+        max_length=20,
+        help_text="Sender phone number"
+    )
+    
+    # Bank and recipient information
+    bank_code = models.ForeignKey(
+        PagoMovilBankCode,
+        on_delete=models.CASCADE,
+        related_name='verification_requests'
+    )
+    recipient = models.ForeignKey(
+        PagoMovilRecipient,
+        on_delete=models.CASCADE,
+        related_name='verification_requests'
+    )
+    
+    # Amount and exchange rate
+    amount_ves = models.DecimalField(
+        max_digits=15,
+        decimal_places=2,
+        help_text="Amount in VES"
+    )
+    exchange_rate_used = models.DecimalField(
+        max_digits=10,
+        decimal_places=4,
+        help_text="Exchange rate at submission time"
+    )
+    usd_equivalent = models.DecimalField(
+        max_digits=10,
+        decimal_places=2,
+        help_text="USD equivalent amount"
+    )
+    
+    # Status and tracking
+    status = models.CharField(
+        max_length=20,
+        choices=STATUS_CHOICES,
+        default='pending'
+    )
+    notes = models.TextField(
+        blank=True,
+        help_text="Admin notes"
+    )
+    
+    # Admin tracking
+    approved_by = models.ForeignKey(
+        'accounts.User',
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='approved_pagomovil_requests'
+    )
+    approved_at = models.DateTimeField(null=True, blank=True)
+    
+    # Timestamps
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+    
+    class Meta:
+        verbose_name = 'Pago Móvil Verification Request'
+        verbose_name_plural = 'Pago Móvil Verification Requests'
+        ordering = ['-created_at']
+        indexes = [
+            models.Index(fields=['user', 'status']),
+            models.Index(fields=['created_at', 'status']),
+        ]
+    
+    def __str__(self):
+        return f"Pago Móvil {self.id} - {self.user.email} - {self.amount_ves} VES ({self.status})"
+    
+    def save(self, *args, **kwargs):
+        """Auto-calculate USD equivalent if not set."""
+        if not self.usd_equivalent and self.amount_ves and self.exchange_rate_used:
+            self.usd_equivalent = self.amount_ves / self.exchange_rate_used
+        super().save(*args, **kwargs)
+    
+    @property
+    def formatted_sender_id(self):
+        """Format sender ID for display."""
+        return self.sender_id.upper()
+    
+    @property
+    def formatted_amount(self):
+        """Format amount for display."""
+        return f"Bs. {self.amount_ves:,.2f}"
+    
+    @property
+    def formatted_usd_equivalent(self):
+        """Format USD equivalent for display."""
+        return f"${self.usd_equivalent:,.2f}"
+    
+    def approve(self, admin_user):
+        """Approve the verification request."""
+        self.status = 'approved'
+        self.approved_by = admin_user
+        self.approved_at = timezone.now()
+        self.save()
+        
+        # Update order if exists
+        if self.order:
+            self.order.payment_status = 'paid'
+            self.order.status = 'confirmed'
+            self.order.save()
+    
+    def reject(self, admin_user, reason=""):
+        """Reject the verification request."""
+        self.status = 'rejected'
+        self.approved_by = admin_user
+        self.approved_at = timezone.now()
+        if reason:
+            self.notes = f"Rejected: {reason}"
+        self.save()

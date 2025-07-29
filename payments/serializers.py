@@ -1,5 +1,8 @@
 from rest_framework import serializers
-from .models import Payment, PaymentMethod, Refund, WebhookEvent, ExchangeRateLog, ExchangeRateAlert, ExchangeRateSnapshot
+from .models import (
+    Payment, PaymentMethod, Refund, WebhookEvent, ExchangeRateLog, ExchangeRateAlert, ExchangeRateSnapshot,
+    PagoMovilBankCode, PagoMovilRecipient, PagoMovilVerificationRequest
+)
 
 
 class PaymentSerializer(serializers.ModelSerializer):
@@ -417,3 +420,185 @@ class ExchangeRateSnapshotSerializer(serializers.ModelSerializer):
             'id', 'usd_to_ves', 'amount_usd', 'amount_ves', 'snapshot_timestamp'
         )
         read_only_fields = '__all__'
+
+
+class PagoMovilBankCodeSerializer(serializers.ModelSerializer):
+    """Serializer for Pago Móvil bank codes."""
+    
+    class Meta:
+        model = PagoMovilBankCode
+        fields = ('id', 'bank_code', 'bank_name', 'is_active')
+        read_only_fields = ('id',)
+
+
+class PagoMovilRecipientSerializer(serializers.ModelSerializer):
+    """Serializer for Pago Móvil recipients."""
+    
+    bank_code_info = PagoMovilBankCodeSerializer(source='bank_code', read_only=True)
+    
+    class Meta:
+        model = PagoMovilRecipient
+        fields = (
+            'id', 'bank_code', 'bank_code_info', 'recipient_id', 
+            'recipient_phone', 'recipient_name', 'is_active'
+        )
+        read_only_fields = ('id',)
+
+
+class PagoMovilVerificationRequestSerializer(serializers.ModelSerializer):
+    """Serializer for Pago Móvil verification requests."""
+    
+    user_email = serializers.CharField(source='user.email', read_only=True)
+    bank_code_info = PagoMovilBankCodeSerializer(source='bank_code', read_only=True)
+    recipient_info = PagoMovilRecipientSerializer(source='recipient', read_only=True)
+    formatted_amount = serializers.CharField(read_only=True)
+    formatted_usd_equivalent = serializers.CharField(read_only=True)
+    approved_by_email = serializers.CharField(source='approved_by.email', read_only=True)
+    
+    class Meta:
+        model = PagoMovilVerificationRequest
+        fields = (
+            'id', 'user', 'user_email', 'order', 'sender_id', 'sender_phone',
+            'bank_code', 'bank_code_info', 'recipient', 'recipient_info',
+            'amount_ves', 'exchange_rate_used', 'usd_equivalent',
+            'formatted_amount', 'formatted_usd_equivalent',
+            'status', 'notes', 'approved_by', 'approved_by_email',
+            'approved_at', 'created_at', 'updated_at'
+        )
+        read_only_fields = (
+            'id', 'user_email', 'bank_code_info', 'recipient_info',
+            'formatted_amount', 'formatted_usd_equivalent',
+            'approved_by', 'approved_by_email', 'approved_at',
+            'created_at', 'updated_at'
+        )
+    
+    def validate_sender_id(self, value):
+        """Validate sender ID format."""
+        import re
+        
+        # Remove spaces and convert to uppercase
+        value = value.replace(' ', '').upper()
+        
+        # Check format: V-12345678 or J-12345678-0
+        pattern = r'^[VJPE][-]\d{8}([-]\d)?$'
+        if not re.match(pattern, value):
+            raise serializers.ValidationError(
+                "Sender ID must be in format V-12345678 or J-12345678-0"
+            )
+        
+        return value
+    
+    def validate_sender_phone(self, value):
+        """Validate sender phone number."""
+        import re
+        
+        # Remove all non-digit characters
+        digits_only = re.sub(r'\D', '', value)
+        
+        # Venezuelan phone numbers should be 10-11 digits
+        if len(digits_only) < 10 or len(digits_only) > 11:
+            raise serializers.ValidationError(
+                "Phone number must be 10-11 digits"
+            )
+        
+        return value
+    
+    def validate(self, data):
+        """Additional validation for the request."""
+        # Check rate limiting (max 3 submissions per hour per user)
+        user = data.get('user')
+        if user:
+            from django.utils import timezone
+            from datetime import timedelta
+            
+            recent_requests = PagoMovilVerificationRequest.objects.filter(
+                user=user,
+                created_at__gte=timezone.now() - timedelta(hours=1)
+            ).count()
+            
+            if recent_requests >= 3:
+                raise serializers.ValidationError(
+                    "Maximum 3 verification requests per hour allowed"
+                )
+        
+        return data
+
+
+class PagoMovilVerificationCreateSerializer(serializers.ModelSerializer):
+    """Serializer for creating Pago Móvil verification requests."""
+    
+    class Meta:
+        model = PagoMovilVerificationRequest
+        fields = (
+            'order', 'sender_id', 'sender_phone', 'bank_code', 
+            'recipient', 'amount_ves'
+        )
+    
+    def validate_sender_id(self, value):
+        """Validate sender ID format."""
+        import re
+        
+        # Remove spaces and convert to uppercase
+        value = value.replace(' ', '').upper()
+        
+        # Check format: V-12345678 or J-12345678-0
+        pattern = r'^[VJPE][-]\d{8}([-]\d)?$'
+        if not re.match(pattern, value):
+            raise serializers.ValidationError(
+                "Sender ID must be in format V-12345678 or J-12345678-0"
+            )
+        
+        return value
+    
+    def validate_sender_phone(self, value):
+        """Validate sender phone number."""
+        import re
+        
+        # Remove all non-digit characters
+        digits_only = re.sub(r'\D', '', value)
+        
+        # Venezuelan phone numbers should be 10-11 digits
+        if len(digits_only) < 10 or len(digits_only) > 11:
+            raise serializers.ValidationError(
+                "Phone number must be 10-11 digits"
+            )
+        
+        return value
+    
+    def validate(self, data):
+        """Additional validation for the request."""
+        # Check rate limiting (max 3 submissions per hour per user)
+        user = self.context['request'].user
+        from django.utils import timezone
+        from datetime import timedelta
+        
+        recent_requests = PagoMovilVerificationRequest.objects.filter(
+            user=user,
+            created_at__gte=timezone.now() - timedelta(hours=1)
+        ).count()
+        
+        if recent_requests >= 3:
+            raise serializers.ValidationError(
+                "Maximum 3 verification requests per hour allowed"
+            )
+        
+        return data
+
+
+class PagoMovilStatusUpdateSerializer(serializers.Serializer):
+    """Serializer for updating Pago Móvil verification status."""
+    
+    status = serializers.ChoiceField(choices=[
+        ('approved', 'Approved'),
+        ('rejected', 'Rejected')
+    ])
+    notes = serializers.CharField(required=False, allow_blank=True)
+
+
+class PagoMovilPaymentInfoSerializer(serializers.Serializer):
+    """Serializer for Pago Móvil payment information."""
+    
+    bank_codes = PagoMovilBankCodeSerializer(many=True)
+    recipients = PagoMovilRecipientSerializer(many=True)
+    current_exchange_rate = serializers.DecimalField(max_digits=10, decimal_places=4)
+    instructions = serializers.CharField()

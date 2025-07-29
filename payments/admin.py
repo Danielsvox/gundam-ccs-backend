@@ -6,7 +6,8 @@ from django.db.models import Q
 from django.contrib import messages
 from .models import (
     Payment, PaymentMethod, Refund, WebhookEvent, Subscription,
-    ExchangeRateLog, ExchangeRateAlert, ExchangeRateSnapshot
+    ExchangeRateLog, ExchangeRateAlert, ExchangeRateSnapshot,
+    PagoMovilBankCode, PagoMovilRecipient, PagoMovilVerificationRequest
 )
 from .services.exchange_rate_service import exchange_rate_service
 from decimal import Decimal
@@ -527,3 +528,113 @@ class SubscriptionAdmin(admin.ModelAdmin):
     def get_queryset(self, request):
         """Optimize queryset with related fields."""
         return super().get_queryset(request).select_related('user')
+
+
+@admin.register(PagoMovilBankCode)
+class PagoMovilBankCodeAdmin(admin.ModelAdmin):
+    """Admin interface for Pago Móvil bank codes."""
+    
+    list_display = ('bank_code', 'bank_name', 'is_active', 'recipient_count')
+    list_filter = ('is_active',)
+    search_fields = ('bank_code', 'bank_name')
+    ordering = ('bank_name',)
+    
+    def recipient_count(self, obj):
+        """Show number of recipients for this bank."""
+        return obj.recipients.filter(is_active=True).count()
+    recipient_count.short_description = 'Active Recipients'
+
+
+@admin.register(PagoMovilRecipient)
+class PagoMovilRecipientAdmin(admin.ModelAdmin):
+    """Admin interface for Pago Móvil recipients."""
+    
+    list_display = ('recipient_name', 'bank_code', 'recipient_id', 'recipient_phone', 'is_active')
+    list_filter = ('is_active', 'bank_code')
+    search_fields = ('recipient_name', 'recipient_id', 'recipient_phone')
+    ordering = ('bank_code__bank_name', 'recipient_name')
+    
+    fieldsets = (
+        ('Recipient Information', {
+            'fields': ('recipient_name', 'recipient_id', 'recipient_phone')
+        }),
+        ('Bank Information', {
+            'fields': ('bank_code',)
+        }),
+        ('Status', {
+            'fields': ('is_active',)
+        }),
+    )
+
+
+@admin.register(PagoMovilVerificationRequest)
+class PagoMovilVerificationRequestAdmin(admin.ModelAdmin):
+    """Admin interface for Pago Móvil verification requests."""
+    
+    list_display = (
+        'id', 'user_email', 'sender_id', 'amount_ves', 'usd_equivalent',
+        'bank_code', 'status', 'created_at', 'approved_by'
+    )
+    list_filter = ('status', 'bank_code', 'created_at', 'approved_at')
+    search_fields = ('user__email', 'sender_id', 'sender_phone')
+    readonly_fields = (
+        'user', 'order', 'exchange_rate_used', 'usd_equivalent',
+        'created_at', 'updated_at', 'approved_at'
+    )
+    ordering = ('-created_at',)
+    
+    fieldsets = (
+        ('Request Information', {
+            'fields': ('user', 'order', 'status', 'created_at', 'updated_at')
+        }),
+        ('Sender Information', {
+            'fields': ('sender_id', 'sender_phone')
+        }),
+        ('Payment Details', {
+            'fields': ('bank_code', 'recipient', 'amount_ves', 'exchange_rate_used', 'usd_equivalent')
+        }),
+        ('Admin Actions', {
+            'fields': ('approved_by', 'approved_at', 'notes'),
+            'classes': ('collapse',)
+        }),
+    )
+    
+    actions = ['approve_selected', 'reject_selected']
+    
+    def user_email(self, obj):
+        """Show user email."""
+        return obj.user.email
+    user_email.short_description = 'User Email'
+    user_email.admin_order_field = 'user__email'
+    
+    def approve_selected(self, request, queryset):
+        """Approve selected verification requests."""
+        count = 0
+        for verification in queryset.filter(status='pending'):
+            verification.approve(request.user)
+            count += 1
+        
+        self.message_user(
+            request,
+            f"Successfully approved {count} verification request(s)."
+        )
+    approve_selected.short_description = "Approve selected verification requests"
+    
+    def reject_selected(self, request, queryset):
+        """Reject selected verification requests."""
+        count = 0
+        for verification in queryset.filter(status='pending'):
+            verification.reject(request.user, "Bulk rejection")
+            count += 1
+        
+        self.message_user(
+            request,
+            f"Successfully rejected {count} verification request(s)."
+        )
+    reject_selected.short_description = "Reject selected verification requests"
+    
+    def get_queryset(self, request):
+        """Optimize queryset with related fields."""
+        return super().get_queryset(request).select_related(
+            'user', 'bank_code', 'recipient', 'approved_by'
+        )

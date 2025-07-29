@@ -24,9 +24,14 @@ from .services.exchange_rate_service import exchange_rate_service
 from .serializers import (
     ExchangeRateSerializer, ExchangeRateCurrentSerializer, ExchangeRateHistorySerializer,
     ManualRateSetSerializer, CurrencyConversionSerializer, CurrencyConversionResponseSerializer,
-    ExchangeRateAlertSerializer, ExchangeRateSnapshotSerializer
+    ExchangeRateAlertSerializer, ExchangeRateSnapshotSerializer,
+    PagoMovilBankCodeSerializer, PagoMovilRecipientSerializer, PagoMovilVerificationRequestSerializer,
+    PagoMovilVerificationCreateSerializer, PagoMovilStatusUpdateSerializer, PagoMovilPaymentInfoSerializer
 )
-from .models import ExchangeRateLog, ExchangeRateAlert, ExchangeRateSnapshot
+from .models import (
+    ExchangeRateLog, ExchangeRateAlert, ExchangeRateSnapshot,
+    PagoMovilBankCode, PagoMovilRecipient, PagoMovilVerificationRequest
+)
 from decimal import Decimal
 from django.utils import timezone
 
@@ -831,3 +836,287 @@ class ExchangeRateStatsView(APIView):
             return Response({
                 'error': 'An error occurred while fetching statistics'
             }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+
+class PagoMovilPaymentInfoView(APIView):
+    """Get Pago Móvil payment information for checkout."""
+    
+    permission_classes = [permissions.AllowAny]
+    
+    def get(self, request):
+        """Get Pago Móvil payment information."""
+        try:
+            # Get active bank codes
+            bank_codes = PagoMovilBankCode.objects.filter(is_active=True)
+            
+            # Get active recipients
+            recipients = PagoMovilRecipient.objects.filter(is_active=True)
+            
+            # Get current exchange rate
+            from .services.exchange_rate_service import exchange_rate_service
+            rate_data = exchange_rate_service.get_current_rate()
+            current_rate = rate_data['usd_to_ves'] if rate_data else 38.0
+            
+            # Payment instructions
+            instructions = """
+            📱 Pago Móvil Instructions:
+            
+            1. Select your bank from the list below
+            2. Use the recipient information provided
+            3. Transfer the amount in Bolívares (VES)
+            4. Submit verification form after transfer
+            5. Wait for admin approval (usually within 24 hours)
+            
+            💡 Tip: Keep your transfer receipt for reference
+            """
+            
+            data = {
+                'bank_codes': PagoMovilBankCodeSerializer(bank_codes, many=True).data,
+                'recipients': PagoMovilRecipientSerializer(recipients, many=True).data,
+                'current_exchange_rate': current_rate,
+                'instructions': instructions.strip()
+            }
+            
+            return Response(data)
+            
+        except Exception as e:
+            logger.error(f"Error getting Pago Móvil payment info: {str(e)}")
+            return Response({
+                'error': 'An error occurred while fetching payment information'
+            }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+
+class PagoMovilVerificationCreateView(APIView):
+    """Create a Pago Móvil verification request."""
+    
+    permission_classes = [permissions.IsAuthenticated]
+    
+    def post(self, request):
+        """Create verification request."""
+        try:
+            serializer = PagoMovilVerificationCreateSerializer(
+                data=request.data,
+                context={'request': request}
+            )
+            
+            if serializer.is_valid():
+                # Get current exchange rate
+                from .services.exchange_rate_service import exchange_rate_service
+                rate_data = exchange_rate_service.get_current_rate()
+                exchange_rate = rate_data['usd_to_ves'] if rate_data else Decimal('38.0')
+                
+                # Create verification request
+                verification_request = serializer.save(
+                    user=request.user,
+                    exchange_rate_used=exchange_rate
+                )
+                
+                # Send WhatsApp notification to admin
+                self._send_admin_notification(verification_request)
+                
+                # Return the created request
+                response_serializer = PagoMovilVerificationRequestSerializer(verification_request)
+                return Response(response_serializer.data, status=status.HTTP_201_CREATED)
+            
+            return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+            
+        except Exception as e:
+            logger.error(f"Error creating Pago Móvil verification: {str(e)}")
+            return Response({
+                'error': 'An error occurred while creating verification request'
+            }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+    
+    def _send_admin_notification(self, verification_request):
+        """Send WhatsApp notification to admin."""
+        try:
+            from .services.whatsapp_service import whatsapp_service
+            
+            # Get admin phone number from settings
+            admin_phone = getattr(settings, 'ADMIN_WHATSAPP_PHONE', None)
+            if not admin_phone:
+                logger.warning("Admin WhatsApp phone not configured")
+                return
+            
+            # Create notification message
+            message = f"""📱 Pago Móvil Verification Request
+
+👤 User: {verification_request.user.email}
+🆔 Sender ID: {verification_request.formatted_sender_id}
+📞 Phone: {verification_request.sender_phone}
+💰 Amount: {verification_request.formatted_amount} (≈ {verification_request.formatted_usd_equivalent})
+🏦 Bank: {verification_request.bank_code.bank_name}
+📅 Timestamp: {verification_request.created_at.strftime('%Y-%m-%d %H:%M')}
+📊 Status: Pending
+
+🔗 Review: /admin/payments/pagomovilverificationrequest/{verification_request.id}/"""
+            
+            # Send notification
+            whatsapp_service.send_custom_message(admin_phone, message)
+            
+        except Exception as e:
+            logger.error(f"Error sending admin notification: {str(e)}")
+
+
+class PagoMovilStatusView(APIView):
+    """Get user's latest Pago Móvil verification status."""
+    
+    permission_classes = [permissions.IsAuthenticated]
+    
+    def get(self, request):
+        """Get user's latest verification status."""
+        try:
+            # Get user's latest verification request
+            latest_request = PagoMovilVerificationRequest.objects.filter(
+                user=request.user
+            ).order_by('-created_at').first()
+            
+            if latest_request:
+                serializer = PagoMovilVerificationRequestSerializer(latest_request)
+                return Response(serializer.data)
+            else:
+                return Response({
+                    'message': 'No verification requests found'
+                }, status=status.HTTP_404_NOT_FOUND)
+                
+        except Exception as e:
+            logger.error(f"Error getting Pago Móvil status: {str(e)}")
+            return Response({
+                'error': 'An error occurred while fetching status'
+            }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+
+class PagoMovilAdminListView(generics.ListAPIView):
+    """Admin view to list and filter Pago Móvil verification requests."""
+    
+    permission_classes = [permissions.IsAuthenticated, permissions.IsAdminUser]
+    serializer_class = PagoMovilVerificationRequestSerializer
+    
+    def get_queryset(self):
+        """Get filtered verification requests."""
+        queryset = PagoMovilVerificationRequest.objects.all()
+        
+        # Filter by status
+        status = self.request.query_params.get('status')
+        if status:
+            queryset = queryset.filter(status=status)
+        
+        # Filter by date range
+        start_date = self.request.query_params.get('start_date')
+        end_date = self.request.query_params.get('end_date')
+        
+        if start_date:
+            try:
+                start_date = timezone.datetime.fromisoformat(start_date.replace('Z', '+00:00'))
+                queryset = queryset.filter(created_at__gte=start_date)
+            except ValueError:
+                pass
+        
+        if end_date:
+            try:
+                end_date = timezone.datetime.fromisoformat(end_date.replace('Z', '+00:00'))
+                queryset = queryset.filter(created_at__lte=end_date)
+            except ValueError:
+                pass
+        
+        # Filter by user email
+        user_email = self.request.query_params.get('user_email')
+        if user_email:
+            queryset = queryset.filter(user__email__icontains=user_email)
+        
+        return queryset.select_related('user', 'bank_code', 'recipient', 'approved_by')
+
+
+class PagoMovilStatusUpdateView(APIView):
+    """Admin view to update Pago Móvil verification status."""
+    
+    permission_classes = [permissions.IsAuthenticated, permissions.IsAdminUser]
+    
+    def patch(self, request, verification_id):
+        """Update verification status."""
+        try:
+            verification_request = get_object_or_404(
+                PagoMovilVerificationRequest,
+                id=verification_id
+            )
+            
+            serializer = PagoMovilStatusUpdateSerializer(data=request.data)
+            if serializer.is_valid():
+                new_status = serializer.validated_data['status']
+                notes = serializer.validated_data.get('notes', '')
+                
+                if new_status == 'approved':
+                    verification_request.approve(request.user)
+                    if notes:
+                        verification_request.notes = notes
+                        verification_request.save()
+                elif new_status == 'rejected':
+                    verification_request.reject(request.user, notes)
+                
+                # Send notification to user
+                self._send_user_notification(verification_request)
+                
+                response_serializer = PagoMovilVerificationRequestSerializer(verification_request)
+                return Response(response_serializer.data)
+            
+            return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+            
+        except Exception as e:
+            logger.error(f"Error updating Pago Móvil status: {str(e)}")
+            return Response({
+                'error': 'An error occurred while updating status'
+            }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+    
+    def _send_user_notification(self, verification_request):
+        """Send notification to user about status update."""
+        try:
+            from .services.whatsapp_service import whatsapp_service
+            
+            # Get user's phone number from the verification request
+            user_phone = verification_request.sender_phone
+            
+            # Format phone number for WhatsApp
+            if user_phone:
+                # Add country code if not present
+                if not user_phone.startswith('58'):
+                    user_phone = '58' + user_phone.replace('+', '')
+                
+                status_emoji = "✅" if verification_request.status == 'approved' else "❌"
+                status_text = "approved" if verification_request.status == 'approved' else "rejected"
+                
+                message = f"""{status_emoji} Pago Móvil Payment {status_text.title()}
+
+💰 Amount: {verification_request.formatted_amount}
+🆔 Sender ID: {verification_request.formatted_sender_id}
+📅 Processed: {verification_request.approved_at.strftime('%Y-%m-%d %H:%M')}
+
+{status_emoji} Status: {status_text.title()}
+
+Thank you for your payment! 🚀"""
+                
+                # Send notification
+                whatsapp_service.send_custom_message(user_phone, message)
+                
+        except Exception as e:
+            logger.error(f"Error sending user notification: {str(e)}")
+
+
+class PagoMovilBankCodeListView(generics.ListAPIView):
+    """List Pago Móvil bank codes."""
+    
+    permission_classes = [permissions.AllowAny]
+    serializer_class = PagoMovilBankCodeSerializer
+    
+    def get_queryset(self):
+        """Get active bank codes."""
+        return PagoMovilBankCode.objects.filter(is_active=True)
+
+
+class PagoMovilRecipientListView(generics.ListAPIView):
+    """List Pago Móvil recipients."""
+    
+    permission_classes = [permissions.AllowAny]
+    serializer_class = PagoMovilRecipientSerializer
+    
+    def get_queryset(self):
+        """Get active recipients."""
+        return PagoMovilRecipient.objects.filter(is_active=True)

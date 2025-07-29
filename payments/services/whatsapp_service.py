@@ -7,90 +7,76 @@ logger = logging.getLogger(__name__)
 
 
 class WhatsAppService:
-    """Service to handle WhatsApp notifications."""
+    """Service for sending WhatsApp notifications via Twilio."""
     
     def __init__(self):
-        self.client = None
-        self.from_number = None
+        self.account_sid = getattr(settings, 'TWILIO_ACCOUNT_SID', None)
+        self.auth_token = getattr(settings, 'TWILIO_AUTH_TOKEN', None)
+        self.from_number = getattr(settings, 'TWILIO_WHATSAPP_FROM', None)
         
-        # Initialize Twilio client if credentials are available
-        if hasattr(settings, 'TWILIO_ACCOUNT_SID') and hasattr(settings, 'TWILIO_AUTH_TOKEN'):
-            try:
-                self.client = Client(settings.TWILIO_ACCOUNT_SID, settings.TWILIO_AUTH_TOKEN)
-                self.from_number = getattr(settings, 'TWILIO_WHATSAPP_NUMBER', None)
-                logger.info("WhatsApp service initialized successfully")
-            except Exception as e:
-                logger.error(f"Failed to initialize WhatsApp service: {str(e)}")
+        if self.account_sid and self.auth_token:
+            self.client = Client(self.account_sid, self.auth_token)
         else:
-            logger.warning("Twilio credentials not configured - WhatsApp notifications disabled")
+            self.client = None
+            logger.warning("Twilio credentials not configured")
     
     def send_order_notification(self, order, phone_number=None):
-        """Send WhatsApp notification for new order."""
+        """Send order notification via WhatsApp."""
         try:
-            if not self.client or not self.from_number:
-                logger.warning("WhatsApp service not configured - skipping notification")
+            if not self.client:
+                logger.warning("Twilio client not available")
                 return False
             
-            # Get customer phone number
-            if not phone_number:
-                phone_number = order.shipping_address.get('phone') if order.shipping_address else None
-            
-            if not phone_number:
-                logger.warning(f"No phone number available for order {order.order_number}")
-                return False
-            
-            # Format phone number for WhatsApp
-            formatted_phone = self._format_phone_number(phone_number)
-            
-            # Create message
             message = self._create_order_message(order)
+            to_number = phone_number or order.user.phone_number
             
-            # Send message
-            message_sid = self.client.messages.create(
-                from_=f"whatsapp:{self.from_number}",
+            if not to_number:
+                logger.warning(f"No phone number available for user {order.user.email}")
+                return False
+            
+            formatted_number = self._format_phone_number(to_number)
+            
+            # Send via Twilio WhatsApp
+            message_obj = self.client.messages.create(
+                from_=f'whatsapp:{self.from_number}',
                 body=message,
-                to=f"whatsapp:{formatted_phone}"
+                to=f'whatsapp:{formatted_number}'
             )
             
-            logger.info(f"Sent WhatsApp notification for order {order.order_number}: {message_sid.sid}")
+            logger.info(f"WhatsApp order notification sent: {message_obj.sid}")
             return True
             
         except TwilioException as e:
-            logger.error(f"Twilio error sending WhatsApp notification: {str(e)}")
+            logger.error(f"Twilio error sending order notification: {str(e)}")
             return False
         except Exception as e:
-            logger.error(f"Error sending WhatsApp notification: {str(e)}")
+            logger.error(f"Error sending order notification: {str(e)}")
             return False
     
     def send_payment_confirmation(self, order, payment, phone_number=None):
-        """Send WhatsApp notification for payment confirmation."""
+        """Send payment confirmation via WhatsApp."""
         try:
-            if not self.client or not self.from_number:
-                logger.warning("WhatsApp service not configured - skipping notification")
+            if not self.client:
+                logger.warning("Twilio client not available")
                 return False
             
-            # Get customer phone number
-            if not phone_number:
-                phone_number = order.shipping_address.get('phone') if order.shipping_address else None
-            
-            if not phone_number:
-                logger.warning(f"No phone number available for order {order.order_number}")
-                return False
-            
-            # Format phone number for WhatsApp
-            formatted_phone = self._format_phone_number(phone_number)
-            
-            # Create message
             message = self._create_payment_confirmation_message(order, payment)
+            to_number = phone_number or order.user.phone_number
             
-            # Send message
-            message_sid = self.client.messages.create(
-                from_=f"whatsapp:{self.from_number}",
+            if not to_number:
+                logger.warning(f"No phone number available for user {order.user.email}")
+                return False
+            
+            formatted_number = self._format_phone_number(to_number)
+            
+            # Send via Twilio WhatsApp
+            message_obj = self.client.messages.create(
+                from_=f'whatsapp:{self.from_number}',
                 body=message,
-                to=f"whatsapp:{formatted_phone}"
+                to=f'whatsapp:{formatted_number}'
             )
             
-            logger.info(f"Sent payment confirmation for order {order.order_number}: {message_sid.sid}")
+            logger.info(f"WhatsApp payment confirmation sent: {message_obj.sid}")
             return True
             
         except TwilioException as e:
@@ -100,55 +86,82 @@ class WhatsAppService:
             logger.error(f"Error sending payment confirmation: {str(e)}")
             return False
     
+    def send_custom_message(self, phone_number, message):
+        """Send a custom message via WhatsApp."""
+        try:
+            if not self.client:
+                logger.warning("Twilio client not available")
+                return False
+            
+            if not phone_number:
+                logger.warning("No phone number provided")
+                return False
+            
+            formatted_number = self._format_phone_number(phone_number)
+            
+            # Send via Twilio WhatsApp
+            message_obj = self.client.messages.create(
+                from_=f'whatsapp:{self.from_number}',
+                body=message,
+                to=f'whatsapp:{formatted_number}'
+            )
+            
+            logger.info(f"WhatsApp custom message sent: {message_obj.sid}")
+            return True
+            
+        except TwilioException as e:
+            logger.error(f"Twilio error sending custom message: {str(e)}")
+            return False
+        except Exception as e:
+            logger.error(f"Error sending custom message: {str(e)}")
+            return False
+    
     def _format_phone_number(self, phone_number):
-        """Format phone number for WhatsApp."""
-        # Remove any non-digit characters
-        cleaned = ''.join(filter(str.isdigit, str(phone_number)))
+        """Format phone number for Twilio."""
+        # Remove all non-digit characters
+        import re
+        digits_only = re.sub(r'\D', '', phone_number)
         
-        # Add country code if not present (assuming Venezuela +58)
-        if not cleaned.startswith('58'):
-            cleaned = '58' + cleaned
+        # Add country code if not present (assume Venezuela +58)
+        if not digits_only.startswith('58'):
+            digits_only = '58' + digits_only
         
-        return cleaned
+        # Add + prefix
+        return '+' + digits_only
     
     def _create_order_message(self, order):
-        """Create WhatsApp message for new order."""
+        """Create order notification message."""
         items_text = "\n".join([
             f"• {item.product.name} x{item.quantity} - ${item.total_price}"
             for item in order.items.all()
         ])
         
-        message = f"""🎉 ¡Nuevo pedido recibido!
+        message = f"""🛒 New Order Received!
 
-📦 Pedido #{order.order_number}
-💰 Total: ${order.total_amount}
-📅 Fecha: {order.created_at.strftime('%d/%m/%Y %H:%M')}
+Order #{order.id}
+Customer: {order.user.email}
+Total: ${order.total_amount}
 
-🛍️ Productos:
+Items:
 {items_text}
 
-📍 Dirección de envío:
-{order.shipping_address.get('address_line_1', '')}
-{order.shipping_address.get('city', '')}, {order.shipping_address.get('state', '')}
+Status: {order.status.title()}
+Payment: {order.payment_status.title()}
 
-📞 Contacto: {order.shipping_address.get('phone', 'N/A')}
-
-¡Gracias por tu compra! 🚀"""
+Thank you for your order! 🚀"""
         
         return message
     
     def _create_payment_confirmation_message(self, order, payment):
-        """Create WhatsApp message for payment confirmation."""
-        message = f"""✅ ¡Pago confirmado!
+        """Create payment confirmation message."""
+        message = f"""💳 Payment Confirmed!
 
-📦 Pedido #{order.order_number}
-💰 Monto: ${payment.amount}
-💳 Método: {payment.get_payment_method_display()}
-📅 Confirmado: {payment.updated_at.strftime('%d/%m/%Y %H:%M')}
+Order #{order.id}
+Amount: ${payment.amount}
+Method: {payment.payment_method.title()}
+Status: {payment.status.title()}
 
-Tu pedido está siendo procesado y será enviado pronto.
-
-¡Gracias por tu compra! 🚀"""
+Your order is being processed! 🚀"""
         
         return message
 
