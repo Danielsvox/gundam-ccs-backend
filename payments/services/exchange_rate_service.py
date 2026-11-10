@@ -29,8 +29,9 @@ class ExchangeRateService:
     
     def __init__(self):
         self.sources = [
-            self._fetch_from_exchangerate_host,  # Most reliable free API
-            self._fetch_from_google_finance,
+            self._fetch_from_bcv,  # Official BCV rate (primary)
+            self._fetch_from_google_finance,  # Same figure as GOOGLEFINANCE
+            self._fetch_from_exchangerate_host,
             self._fetch_from_open_exchange_rates,
         ]
     
@@ -202,60 +203,110 @@ class ExchangeRateService:
             logger.error(f"Exchangerate.host fetch failed: {str(e)}")
             raise
     
+    def _fetch_from_bcv(self) -> Optional[Dict[str, Any]]:
+        """
+        Official USD/VES rate published by the Banco Central de Venezuela (bcv.org.ve).
+
+        The BCV server omits the correct intermediate certificate, so plain HTTPS
+        verification fails. We keep full verification and add that public intermediate
+        (payments/certs) to the trusted set instead of disabling checks.
+        """
+        response = self._bcv_session().get(
+            "https://www.bcv.org.ve/",
+            headers={'User-Agent': 'Mozilla/5.0 (compatible; GundamCCS rate fetcher)'},
+            timeout=15,
+        )
+        response.raise_for_status()
+        rate, value_date = self._parse_bcv_rate(response.text)
+        return {'rate': rate, 'source': 'bcv', 'value_date': value_date}
+
+    @staticmethod
+    def _bcv_session() -> requests.Session:
+        import os
+        import ssl
+        import certifi
+        from requests.adapters import HTTPAdapter
+
+        class _Adapter(HTTPAdapter):
+            def init_poolmanager(self, *args, **kwargs):
+                ctx = ssl.create_default_context(cafile=certifi.where())
+                ctx.load_verify_locations(cafile=os.path.join(
+                    os.path.dirname(os.path.dirname(__file__)), 'certs',
+                    'sectigo_dv_r36_intermediate.pem'))
+                kwargs['ssl_context'] = ctx
+                super().init_poolmanager(*args, **kwargs)
+
+        session = requests.Session()
+        session.mount('https://bcv.org.ve', _Adapter())
+        session.mount('https://www.bcv.org.ve', _Adapter())
+        return session
+
+    @staticmethod
+    def _parse_bcv_rate(html: str):
+        """Return (rate, value_date) from the #dolar block of the BCV home page."""
+        start = html.find('id="dolar"')
+        if start < 0:
+            raise ValueError('BCV page has no USD block')
+        block = html[start:start + 2000]
+        match = re.search(r'<strong[^>]*>\s*([\d.,]+)\s*</strong>', block)
+        if not match:
+            raise ValueError('BCV page has no USD rate')
+        raw = match.group(1)
+        # BCV uses a decimal comma ("899,27050000"); drop any thousands dots.
+        rate = Decimal(raw.replace('.', '').replace(',', '.'))
+        if not rate.is_finite() or rate <= 0:
+            raise ValueError('BCV rate is not valid')
+        date_match = re.search(r'Fecha Valor:.*?content="([^"]+)"', html[start:], re.S)
+        return rate, (date_match.group(1) if date_match else None)
+
     def _fetch_from_google_finance(self) -> Optional[Dict[str, Any]]:
         """
-        Fetch USD to VES rate from Google Finance.
-        
-        Returns:
-            Dict with rate and source or None if failed
+        Read USD/VES from the Google Finance quote page (the same figure
+        =GOOGLEFINANCE("CURRENCY:USDVES") returns). No markup is applied.
+
+        The page no longer renders the price in the HTML; it ships it inside
+        AF_initDataCallback JSON blocks, so we parse those rather than CSS classes.
         """
-        try:
-            url = "https://www.google.com/finance/quote/USD-VES"
-            headers = {
-                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
-            }
-            
-            logger.info(f"Fetching from Google Finance: {url}")
-            response = requests.get(url, headers=headers, timeout=15)
-            response.raise_for_status()
-            
-            soup = BeautifulSoup(response.content, 'html.parser')
-            
-            # Look for the price element (Google Finance uses various selectors)
-            price_selectors = [
-                '[data-last-price]',
-                '.YMlKec.fxKbKc',
-                '.kf1m0',
-                '.YMlKec',
-                '[data-last-price]',
-                '.fxKbKc'
-            ]
-            
-            rate = None
-            for selector in price_selectors:
-                price_element = soup.select_one(selector)
-                if price_element:
-                    price_text = price_element.get('data-last-price') or price_element.text.strip()
-                    logger.info(f"Found price element with text: {price_text}")
-                    # Clean and extract numeric value
-                    rate_match = re.search(r'[\d,]+\.?\d*', price_text.replace(',', ''))
-                    if rate_match:
-                        rate = float(rate_match.group())
-                        logger.info(f"Extracted rate {rate} from Google Finance")
-                        break
-            
-            if rate and rate > 0:
-                return {
-                    'rate': rate,
-                    'source': 'google_finance'
-                }
-            else:
-                raise ValueError("Could not extract valid rate from Google Finance")
-                
-        except Exception as e:
-            logger.error(f"Google Finance fetch failed: {str(e)}")
-            raise
-    
+        url = "https://www.google.com/finance/quote/USD-VES?hl=en"
+        headers = {
+            'User-Agent': ('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 '
+                           '(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'),
+            'Accept-Language': 'en-US,en;q=0.9',
+        }
+        response = requests.get(url, headers=headers, timeout=15)
+        response.raise_for_status()
+        rate = self._parse_google_finance_rate(response.text)
+        return {'rate': rate, 'source': 'google_finance'}
+
+    @staticmethod
+    def _parse_google_finance_rate(html: str) -> Decimal:
+        """Find the "USD / VES" quote in the embedded data and return its price."""
+        blocks = re.findall(
+            r"AF_initDataCallback\(\{key: 'ds:\d+'.*?data:(.*?), sideChannel", html, re.S)
+
+        def find_quote(node):
+            if isinstance(node, list):
+                if (len(node) > 5 and node[2] == 'USD / VES'
+                        and isinstance(node[5], list) and node[5]
+                        and isinstance(node[5][0], (int, float))):
+                    return node[5][0]
+                for child in node:
+                    found = find_quote(child)
+                    if found is not None:
+                        return found
+            return None
+
+        for block in blocks:
+            if 'USD / VES' not in block:
+                continue
+            try:
+                price = find_quote(json.loads(block))
+            except ValueError:
+                continue
+            if price is not None and price > 0:
+                return Decimal(str(price))
+        raise ValueError('Could not find the USD/VES quote in the Google Finance page')
+
     def _fetch_from_open_exchange_rates(self) -> Optional[Dict[str, Any]]:
         """
         Fetch USD to VES rate from Open Exchange Rates API.
