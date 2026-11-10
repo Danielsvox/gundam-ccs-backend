@@ -241,6 +241,7 @@ class ExchangeRateLog(models.Model):
     """Store historical exchange rates for USD to VES conversion."""
 
     RATE_SOURCES = [
+        ('bcv', 'BCV (Banco Central de Venezuela)'),
         ('google_finance', 'Google Finance'),
         ('exchangerate_host', 'Exchangerate.host'),
         ('open_exchange_rates', 'Open Exchange Rates'),

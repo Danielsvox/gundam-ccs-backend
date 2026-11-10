@@ -16,7 +16,9 @@ urlpatterns = [
     # Coupons
     path('coupons/', views.CartCouponListView.as_view(), name='coupon_list'),
     path('coupons/apply/', views.ApplyCouponView.as_view(), name='apply_coupon'),
-    path('coupons/remove/', views.RemoveCouponView.as_view(), name='remove_coupon'),
+    # RemoveCouponView.delete(request, coupon_id) needs the id in the URL; the previous
+    # id-less route raised TypeError on every call.
+    path('coupons/<int:coupon_id>/remove/', views.RemoveCouponView.as_view(), name='remove_coupon'),
     path('applied-coupons/', views.AppliedCouponListView.as_view(),
          name='applied_coupons'),
 

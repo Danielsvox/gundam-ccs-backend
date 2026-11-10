@@ -1,9 +1,13 @@
+from decimal import Decimal, InvalidOperation
+
 from rest_framework import status, generics, permissions, filters
 from rest_framework.decorators import api_view, permission_classes
+from rest_framework.exceptions import ValidationError
+from rest_framework.pagination import PageNumberPagination
 from rest_framework.response import Response
 from rest_framework.views import APIView
 from django_filters.rest_framework import DjangoFilterBackend
-from django.db.models import Q, Avg
+from django.db.models import Q, Avg, Case, Count, DecimalField, F, Max, Min, When
 from django.shortcuts import get_object_or_404
 
 from .models import Category, Product, ProductImage, Review, ProductSpecification
@@ -32,42 +36,131 @@ class CategoryDetailView(generics.RetrieveAPIView):
     lookup_field = 'slug'
 
 
+class CatalogPagination(PageNumberPagination):
+    """Default page size, but let the storefront choose (bounded) via ?page_size=."""
+
+    page_size = 20
+    page_size_query_param = 'page_size'
+    max_page_size = 60
+
+
+def with_effective_price(queryset):
+    """Annotate the price a customer actually pays (mirrors Product.current_price)."""
+    return queryset.annotate(
+        effective_price=Case(
+            When(sale_price__isnull=False, sale_price__gt=0, then=F('sale_price')),
+            default=F('price'),
+            output_field=DecimalField(max_digits=10, decimal_places=2),
+        )
+    )
+
+
+def parse_price_param(request, name):
+    raw = request.query_params.get(name)
+    if raw in (None, ''):
+        return None
+    try:
+        value = Decimal(raw)
+    except (InvalidOperation, ValueError):
+        raise ValidationError({name: 'Enter a valid number.'})
+    if not value.is_finite() or value < 0:
+        raise ValidationError({name: 'Enter a non-negative number.'})
+    return value
+
+
 class ProductListView(generics.ListAPIView):
     """Product list view with filtering and search."""
 
     permission_classes = [permissions.AllowAny]
     serializer_class = ProductListSerializer
+    pagination_class = CatalogPagination
     filter_backends = [DjangoFilterBackend,
                        filters.SearchFilter, filters.OrderingFilter]
-    filterset_fields = ['category', 'grade',
+    filterset_fields = ['category', 'grade', 'scale',
                         'manufacturer', 'in_stock', 'is_featured']
-    search_fields = ['name', 'description', 'short_description']
-    ordering_fields = ['price', 'sale_price', 'rating', 'created_at', 'name']
+    search_fields = ['name', 'description', 'short_description',
+                     'manufacturer', 'scale', 'sku']
+    ordering_fields = ['price', 'effective_price', 'sale_price',
+                       'rating', 'created_at', 'name']
     ordering = ['-created_at']
 
     def get_queryset(self):
         """Get filtered products."""
-        queryset = Product.objects.filter(
-            is_active=True).select_related('category')
+        queryset = with_effective_price(
+            Product.objects.filter(is_active=True)
+            .select_related('category')
+            .prefetch_related('images')
+        )
 
         # Custom filters
         category_slug = self.request.query_params.get('category_slug')
         if category_slug:
             queryset = queryset.filter(category__slug=category_slug)
 
-        min_price = self.request.query_params.get('min_price')
-        if min_price:
-            queryset = queryset.filter(price__gte=min_price)
+        # Price filters apply to the price the customer pays (sale price if any).
+        min_price = parse_price_param(self.request, 'min_price')
+        if min_price is not None:
+            queryset = queryset.filter(effective_price__gte=min_price)
 
-        max_price = self.request.query_params.get('max_price')
-        if max_price:
-            queryset = queryset.filter(price__lte=max_price)
+        max_price = parse_price_param(self.request, 'max_price')
+        if max_price is not None:
+            queryset = queryset.filter(effective_price__lte=max_price)
 
         on_sale = self.request.query_params.get('on_sale')
         if on_sale == 'true':
-            queryset = queryset.filter(sale_price__isnull=False)
+            queryset = queryset.filter(sale_price__isnull=False,
+                                       sale_price__lt=F('price'))
+
+        # `in_stock` is only a flag (defaults to True with quantity 0), so offer a
+        # filter that requires both flag and quantity.
+        if self.request.query_params.get('available') == 'true':
+            queryset = queryset.filter(in_stock=True, stock_quantity__gt=0)
 
         return queryset
+
+
+@api_view(['GET'])
+@permission_classes([permissions.AllowAny])
+def product_facets(request):
+    """Values available for catalog filters (active products only, unfiltered counts)."""
+    active = Product.objects.filter(is_active=True)
+    grade_labels = dict(Product.GRADE_CHOICES)
+
+    grades = [
+        {'value': row['grade'], 'label': grade_labels.get(row['grade'], row['grade']),
+         'count': row['count']}
+        for row in active.values('grade').annotate(count=Count('id')).order_by('grade')
+    ]
+    scales = [
+        {'value': row['scale'], 'count': row['count']}
+        for row in active.exclude(scale='').values('scale')
+        .annotate(count=Count('id')).order_by('scale')
+    ]
+    manufacturers = [
+        {'value': row['manufacturer'], 'count': row['count']}
+        for row in active.exclude(manufacturer='').values('manufacturer')
+        .annotate(count=Count('id')).order_by('manufacturer')
+    ]
+    categories = [
+        {'slug': row['category__slug'], 'name': row['category__name'],
+         'count': row['count']}
+        for row in active.filter(category__is_active=True)
+        .values('category__slug', 'category__name')
+        .annotate(count=Count('id')).order_by('category__name')
+    ]
+    prices = with_effective_price(active).aggregate(
+        min=Min('effective_price'), max=Max('effective_price'))
+
+    return Response({
+        'grades': grades,
+        'scales': scales,
+        'manufacturers': manufacturers,
+        'categories': categories,
+        'price_range': {
+            'min': f"{prices['min']:.2f}" if prices['min'] is not None else None,
+            'max': f"{prices['max']:.2f}" if prices['max'] is not None else None,
+        },
+    })
 
 
 class ProductDetailView(generics.RetrieveAPIView):
@@ -75,7 +168,9 @@ class ProductDetailView(generics.RetrieveAPIView):
 
     permission_classes = [permissions.AllowAny]
     serializer_class = ProductDetailSerializer
-    queryset = Product.objects.filter(is_active=True)
+    queryset = (Product.objects.filter(is_active=True)
+                .select_related('category')
+                .prefetch_related('images', 'specifications', 'reviews__user'))
     lookup_field = 'slug'
 
 
@@ -91,7 +186,7 @@ class ProductSearchView(generics.ListAPIView):
     def get_queryset(self):
         """Get search results."""
         queryset = Product.objects.filter(
-            is_active=True).select_related('category')
+            is_active=True).select_related('category').prefetch_related('images')
 
         # Get search query
         query = self.request.query_params.get('q', '')
@@ -116,7 +211,8 @@ class FeaturedProductsView(generics.ListAPIView):
 
     def get_queryset(self):
         """Get featured products."""
-        return Product.objects.filter(is_active=True, is_featured=True).select_related('category')
+        return (Product.objects.filter(is_active=True, is_featured=True)
+                .select_related('category').prefetch_related('images'))
 
 
 class NewArrivalsView(generics.ListAPIView):
