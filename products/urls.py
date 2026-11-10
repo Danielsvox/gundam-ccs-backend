@@ -11,8 +11,8 @@ urlpatterns = [
 
     # Products
     path('products/', views.ProductListView.as_view(), name='product_list'),
-    path('products/<slug:slug>/', views.ProductDetailView.as_view(),
-         name='product_detail'),
+    # NOTE: literal routes must come BEFORE the <slug> route, otherwise
+    # "search", "featured", ... are captured as product slugs and 404.
     path('products/search/', views.ProductSearchView.as_view(),
          name='product_search'),
     path('products/featured/', views.FeaturedProductsView.as_view(),
@@ -21,6 +21,9 @@ urlpatterns = [
          views.NewArrivalsView.as_view(), name='new_arrivals'),
     path('products/on-sale/', views.OnSaleProductsView.as_view(),
          name='on_sale_products'),
+    path('products/facets/', views.product_facets, name='product_facets'),
+    path('products/<slug:slug>/', views.ProductDetailView.as_view(),
+         name='product_detail'),
 
     # Reviews
     path('reviews/', views.ReviewListView.as_view(), name='review_list'),

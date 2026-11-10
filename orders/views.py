@@ -138,10 +138,10 @@ class OrderCancelView(APIView):
 
     permission_classes = [permissions.IsAuthenticated]
 
-    def post(self, request, order_id):
+    def post(self, request, pk):
         """Cancel an order."""
         try:
-            order = Order.objects.get(id=order_id, user=request.user)
+            order = Order.objects.get(id=pk, user=request.user)
         except Order.DoesNotExist:
             return Response({'error': 'Order not found.'}, status=status.HTTP_404_NOT_FOUND)
 
@@ -159,11 +159,9 @@ class OrderCancelView(APIView):
                 notes=request.data.get('reason', 'Order cancelled by customer')
             )
 
-            # Restore inventory (if needed)
-            for order_item in order.items.all():
-                product = order_item.product
-                product.stock_quantity += order_item.quantity
-                product.save()
+            # Give the reserved stock back (logged in the stock history)
+            from products.inventory_service import restore_for_order
+            restore_for_order(order, user=request.user)
 
         return Response({'message': 'Order cancelled successfully.'}, status=status.HTTP_200_OK)
 

@@ -18,8 +18,15 @@ class CategorySerializer(serializers.ModelSerializer):
                             'created_at', 'updated_at')
 
     def get_product_count(self, obj):
-        """Get the number of products in this category."""
-        return obj.products.filter(is_active=True).count()
+        """Get the number of products in this category.
+
+        Memoised per request: a product list nests the category on every row and
+        used to run one COUNT query per product.
+        """
+        counts = self.context.setdefault('_category_counts', {})
+        if obj.pk not in counts:
+            counts[obj.pk] = obj.products.filter(is_active=True).count()
+        return counts[obj.pk]
 
 
 class ProductImageSerializer(serializers.ModelSerializer):
@@ -70,6 +77,15 @@ class ReviewSerializer(serializers.ModelSerializer):
         return super().create(validated_data)
 
 
+def _primary_image_data(product, context):
+    """Pick the primary image in Python so a prefetch_related('images') is enough."""
+    images = list(product.images.all())
+    if not images:
+        return None
+    primary = next((img for img in images if img.is_primary), images[0])
+    return ProductImageSerializer(primary, context=context).data
+
+
 class ProductListSerializer(serializers.ModelSerializer):
     """Serializer for listing products."""
 
@@ -89,15 +105,8 @@ class ProductListSerializer(serializers.ModelSerializer):
                             'review_count', 'created_at')
 
     def get_primary_image(self, obj):
-        """Get the primary image for the product."""
-        primary_image = obj.images.filter(is_primary=True).first()
-        if primary_image:
-            return ProductImageSerializer(primary_image).data
-        # Fallback to first image
-        first_image = obj.images.first()
-        if first_image:
-            return ProductImageSerializer(first_image).data
-        return None
+        """Primary image (or first image). Works from the prefetch cache, no extra queries."""
+        return _primary_image_data(obj, self.context)
 
     def get_current_price(self, obj):
         """Get the current price of the product."""
@@ -161,13 +170,7 @@ class ProductSearchSerializer(serializers.ModelSerializer):
 
     def get_primary_image(self, obj):
         """Get the primary image for the product."""
-        primary_image = obj.images.filter(is_primary=True).first()
-        if primary_image:
-            return ProductImageSerializer(primary_image).data
-        first_image = obj.images.first()
-        if first_image:
-            return ProductImageSerializer(first_image).data
-        return None
+        return _primary_image_data(obj, self.context)
 
     def get_current_price(self, obj):
         """Get the current price of the product."""

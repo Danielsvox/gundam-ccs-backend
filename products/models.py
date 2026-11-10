@@ -72,6 +72,13 @@ class Product(models.Model):
     review_count = models.PositiveIntegerField(default=0)
     is_featured = models.BooleanField(default=False)
     is_active = models.BooleanField(default=True)
+    # PRIVATE (inventory/owner tools only; never in public serializers)
+    cost_usd = models.DecimalField(
+        max_digits=10, decimal_places=2, blank=True, null=True,
+        help_text='Unit cost incl. shipping, USD. Private.')
+    investor = models.CharField(
+        max_length=200, blank=True,
+        help_text='Who bought/funded this stock (e.g. "Carlos x2, Miguel"). Private.')
     created_by = models.ForeignKey(
         User, on_delete=models.SET_NULL, null=True, blank=True,
         related_name='created_products'
@@ -87,7 +94,15 @@ class Product(models.Model):
         if not self.slug:
             self.slug = slugify(self.name)
         if not self.sku:
-            self.sku = f"GUN-{self.id:06d}" if self.id else "GUN-000000"
+            if self.id:
+                self.sku = f"GUN-{self.id:06d}"
+            else:
+                # New row: placeholder first (sku is unique), real SKU once we have an id.
+                import uuid
+                self.sku = f"TMP-{uuid.uuid4().hex[:12]}"
+                super().save(*args, **kwargs)
+                self.sku = f"GUN-{self.id:06d}"
+                kwargs = {'update_fields': ['sku']}
         super().save(*args, **kwargs)
 
     def __str__(self):
@@ -203,3 +218,33 @@ class ProductSpecification(models.Model):
         verbose_name_plural = 'Product Specifications'
         ordering = ['order', 'name']
         unique_together = ['product', 'name']
+
+
+class StockMovement(models.Model):
+    """Append-only log of every stock change (who, why, how much)."""
+
+    REASONS = [
+        ('initial', 'Initial stock'),
+        ('purchase', 'Purchase / restock'),
+        ('adjustment', 'Manual adjustment'),
+        ('order', 'Reserved by order'),
+        ('order_cancelled', 'Restored: order cancelled'),
+    ]
+
+    product = models.ForeignKey(
+        Product, on_delete=models.CASCADE, related_name='stock_movements')
+    delta = models.IntegerField(help_text='Positive adds stock, negative removes it.')
+    quantity_after = models.PositiveIntegerField()
+    reason = models.CharField(max_length=20, choices=REASONS)
+    note = models.CharField(max_length=255, blank=True)
+    order_number = models.CharField(max_length=50, blank=True)
+    user = models.ForeignKey(
+        User, on_delete=models.SET_NULL, null=True, blank=True,
+        related_name='stock_movements')
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ['-created_at', '-id']
+
+    def __str__(self):
+        return f"{self.product_id} {self.delta:+d} ({self.reason})"

@@ -533,6 +533,15 @@ class PagoMovilVerificationCreateSerializer(serializers.ModelSerializer):
             'order', 'sender_id', 'sender_phone', 'bank_code', 
             'recipient', 'amount_ves'
         )
+
+    def validate_order(self, order):
+        """The order must belong to the requester and still be unpaid."""
+        if order is not None:
+            if order.user_id != self.context['request'].user.id:
+                raise serializers.ValidationError('Invalid order.')
+            if order.payment_status == 'paid':
+                raise serializers.ValidationError('This order is already paid.')
+        return order
     
     def validate_sender_id(self, value):
         """Validate sender ID format."""

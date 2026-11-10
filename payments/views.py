@@ -2,6 +2,7 @@ import stripe
 import logging
 from decimal import Decimal
 from django.conf import settings
+from django.db import transaction
 from django.shortcuts import get_object_or_404
 from django.http import JsonResponse
 from django.views.decorators.csrf import csrf_exempt
@@ -19,6 +20,7 @@ from .serializers import (
 )
 from .services import payment_processor, whatsapp_service
 from orders.models import Order, OrderItem
+from products.inventory_service import InsufficientStock, reserve_for_order
 from cart.models import Cart
 from .services.exchange_rate_service import exchange_rate_service
 from .serializers import (
@@ -179,6 +181,7 @@ class CheckoutView(APIView):
 
     permission_classes = [permissions.IsAuthenticated]
 
+    @transaction.atomic
     def post(self, request):
         """Process checkout and create order for manual payment."""
         try:
@@ -195,6 +198,12 @@ class CheckoutView(APIView):
             billing_address = request.data.get('billing_address', {})
             customer_notes = request.data.get('customer_notes', '')
             shipping_method_id = request.data.get('shipping_method_id')
+            # Pago Móvil orders are created first; the payment is then verified
+            # by an admin against a PagoMovilVerificationRequest linked to the order.
+            payment_method = (
+                'pago_movil'
+                if request.data.get('payment_method') == 'pago_movil' else ''
+            )
 
             # Validate required fields
             if not shipping_address:
@@ -239,6 +248,7 @@ class CheckoutView(APIView):
                 shipping_address=shipping_address,
                 billing_address=billing_address or shipping_address,
                 customer_notes=customer_notes,
+                payment_method=payment_method,
                 status='pending',
                 payment_status='pending'
             )
@@ -254,6 +264,21 @@ class CheckoutView(APIView):
                     unit_price=cart_item.product.current_price,
                     total_price=cart_item.total_price
                 )
+
+            # Reserve stock atomically with the order (rolls back everything on failure)
+            try:
+                reserve_for_order(
+                    order,
+                    [(ci.product, ci.quantity) for ci in cart.items.select_related('product')],
+                    user=request.user)
+            except InsufficientStock as exc:
+                transaction.set_rollback(True)
+                return Response({
+                    'error': f'Not enough stock for {exc.product.name}. Available: {exc.available}.',
+                    'code': 'insufficient_stock',
+                    'product': exc.product.name,
+                    'available': exc.available,
+                }, status=status.HTTP_409_CONFLICT)
 
             # Apply coupon if any
             applied_coupons = cart.applied_coupons.all()
@@ -282,12 +307,13 @@ class CheckoutView(APIView):
                 'order_number': order.order_number,
                 'amount': total_amount,
                 'payment_status': 'pending',
-                'payment_method': 'manual',
+                'payment_method': payment_method or 'manual',
                 'message': 'Order created successfully! Payment will be processed manually.',
                 'success': True
             })
 
         except Exception as e:
+            transaction.set_rollback(True)
             logger.error(f"Error in checkout process: {str(e)}")
             return Response({
                 'error': 'An unexpected error occurred during checkout.'
